@@ -1,0 +1,1233 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111417">
+<title>문제집 스캐너 — 여러 장 찍어서 PDF 한 개로</title>
+<style>
+:root{
+  --bg:#0f1216; --panel:#171b21; --panel2:#1e242c; --line:#2a323c;
+  --fg:#e8edf3; --dim:#93a1b1; --accent:#4c8dff; --accent2:#2f6fd0;
+  --danger:#ff5f56; --ok:#39d98a; --radius:14px;
+}
+@media (prefers-color-scheme: light){
+  :root{ --bg:#f2f4f7; --panel:#ffffff; --panel2:#f7f9fc; --line:#dfe5ec;
+         --fg:#111820; --dim:#5c6b7a; }
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--bg); color:var(--fg);
+  font:15px/1.5 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Pretendard","Malgun Gothic",system-ui,sans-serif;
+  display:flex; flex-direction:column;
+  -webkit-text-size-adjust:100%;
+}
+button{font:inherit;color:inherit}
+
+/* ---------- header ---------- */
+header{
+  padding:calc(env(safe-area-inset-top) + 12px) 16px 12px;
+  display:flex; align-items:center; gap:10px;
+  border-bottom:1px solid var(--line); background:var(--panel);
+  position:sticky; top:0; z-index:5;
+}
+header h1{margin:0;font-size:17px;font-weight:700;letter-spacing:-.02em}
+header .count{
+  margin-left:auto; font-size:13px; color:var(--dim);
+  background:var(--panel2); border:1px solid var(--line);
+  padding:4px 10px; border-radius:999px; white-space:nowrap;
+}
+.iconbtn{
+  background:var(--panel2); border:1px solid var(--line); border-radius:10px;
+  width:36px;height:36px; display:grid;place-items:center; cursor:pointer; font-size:16px;
+}
+.iconbtn:active{transform:scale(.94)}
+
+/* ---------- main ---------- */
+main{flex:1; overflow-y:auto; padding:14px 14px 8px; -webkit-overflow-scrolling:touch}
+#grid{
+  display:grid; gap:12px;
+  grid-template-columns:repeat(auto-fill,minmax(140px,1fr));
+}
+.card{
+  background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+  overflow:hidden; position:relative; display:flex; flex-direction:column;
+}
+.card .thumbwrap{position:relative; aspect-ratio:3/4; background:var(--panel2); overflow:hidden}
+.card img{width:100%;height:100%;object-fit:contain;display:block}
+.card .num{
+  position:absolute; top:6px; left:6px; z-index:2;
+  background:rgba(0,0,0,.66); color:#fff; font-size:12px; font-weight:700;
+  min-width:22px;height:22px; padding:0 6px; border-radius:999px;
+  display:grid;place-items:center;
+}
+.card .spin{
+  position:absolute; inset:0; display:grid; place-items:center;
+  background:var(--panel2); color:var(--dim); font-size:12px;
+}
+.card .row{display:flex; border-top:1px solid var(--line)}
+.card .row button{
+  flex:1; background:transparent; border:0; padding:9px 0; cursor:pointer;
+  font-size:14px; color:var(--dim);
+}
+.card .row button + button{border-left:1px solid var(--line)}
+.card .row button:active{background:var(--panel2)}
+.card .row button.del{color:var(--danger)}
+
+.empty{
+  text-align:center; color:var(--dim); padding:52px 20px; line-height:1.8;
+}
+.empty .big{font-size:44px; margin-bottom:6px}
+.empty b{color:var(--fg)}
+
+/* ---------- toolbar ---------- */
+footer{
+  border-top:1px solid var(--line); background:var(--panel);
+  padding:10px 14px calc(env(safe-area-inset-bottom) + 10px);
+  display:flex; gap:8px;
+}
+footer button{
+  flex:1; border-radius:12px; border:1px solid var(--line); background:var(--panel2);
+  padding:13px 8px; font-weight:600; cursor:pointer; font-size:14px;
+}
+footer button.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+footer button:disabled{opacity:.45}
+footer button:active{transform:scale(.98)}
+
+/* ---------- overlays ---------- */
+.overlay{
+  position:fixed; inset:0; z-index:20; background:rgba(0,0,0,.72);
+  display:none; flex-direction:column;
+}
+.overlay.on{display:flex}
+.sheet{
+  margin-top:auto; background:var(--panel); border-radius:18px 18px 0 0;
+  border-top:1px solid var(--line);
+  padding:16px 16px calc(env(safe-area-inset-bottom) + 16px);
+  max-height:92%; overflow-y:auto;
+}
+.sheet h2{margin:2px 0 14px; font-size:16px}
+.field{display:flex; align-items:center; gap:10px; margin:12px 0}
+.field label{flex:1; font-size:14px; color:var(--dim)}
+.field input[type=text],.field input[type=number],.field select{
+  background:var(--panel2); border:1px solid var(--line); color:var(--fg);
+  border-radius:9px; padding:9px 10px; font:inherit; min-width:0; width:150px;
+}
+.seg{display:flex; gap:6px; flex-wrap:wrap}
+.seg button{
+  background:var(--panel2); border:1px solid var(--line); border-radius:999px;
+  padding:8px 14px; cursor:pointer; font-size:13px;
+}
+.seg button.sel{background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600}
+.sheet .actions{display:flex; gap:8px; margin-top:16px}
+.sheet .actions button{
+  flex:1; padding:13px; border-radius:12px; border:1px solid var(--line);
+  background:var(--panel2); cursor:pointer; font-weight:600;
+}
+.sheet .actions button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.hint{font-size:12.5px;color:var(--dim);line-height:1.65;margin:8px 0 0}
+
+/* ---------- crop editor ---------- */
+#editor .top{
+  padding:calc(env(safe-area-inset-top) + 10px) 14px 10px;
+  display:flex;gap:8px;align-items:center;background:var(--panel);border-bottom:1px solid var(--line);
+}
+#editor .top .title{font-weight:700;font-size:15px}
+#editor .top .sp{margin-left:auto}
+#editor .stage{
+  flex:1; position:relative; overflow:hidden; touch-action:none;
+  display:grid; place-items:center; background:#000;
+}
+#cropHost{position:relative; touch-action:none}
+#cropHost img{display:block; max-width:100%; max-height:100%; user-select:none; -webkit-user-drag:none}
+#cropSvg{position:absolute; inset:0; width:100%; height:100%; overflow:visible}
+#cropSvg polygon{fill:rgba(76,141,255,.18); stroke:#4c8dff; stroke-width:2; vector-effect:non-scaling-stroke}
+.handle{
+  position:absolute; width:34px;height:34px; margin:-17px 0 0 -17px;
+  border-radius:50%; background:rgba(76,141,255,.28); border:2px solid #fff;
+  box-shadow:0 0 0 1px rgba(0,0,0,.5); touch-action:none; cursor:grab;
+}
+#editor .bottom{
+  background:var(--panel); border-top:1px solid var(--line);
+  padding:12px 14px calc(env(safe-area-inset-bottom) + 12px);
+  display:flex; flex-direction:column; gap:10px;
+}
+#editor .bottom .seg{justify-content:center}
+#editor .bottom .actions{display:flex;gap:8px}
+#editor .bottom .actions button{
+  flex:1;padding:13px;border-radius:12px;border:1px solid var(--line);
+  background:var(--panel2);cursor:pointer;font-weight:600;
+}
+#editor .bottom .actions button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+
+/* ---------- live camera ---------- */
+#cam .camtop{
+  padding:calc(env(safe-area-inset-top) + 10px) 14px 10px; background:#000; color:#fff;
+  display:flex;align-items:center;gap:10px;
+}
+#cam video{flex:1; width:100%; object-fit:cover; background:#000; min-height:0}
+#cam .cambottom{
+  background:#000; color:#fff; padding:14px 20px calc(env(safe-area-inset-bottom) + 18px);
+  display:flex; align-items:center; justify-content:space-between; gap:16px;
+}
+#shutter{
+  width:70px;height:70px;border-radius:50%;background:#fff;border:5px solid rgba(255,255,255,.35);
+  cursor:pointer;
+}
+#shutter:active{transform:scale(.93)}
+#cam .camcount{font-size:14px;min-width:70px}
+#cam .done{
+  background:transparent;border:1px solid rgba(255,255,255,.45);color:#fff;
+  padding:10px 16px;border-radius:10px;cursor:pointer;min-width:70px;font-weight:600;
+}
+.flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .18s}
+.flash.on{opacity:.85;transition:none}
+
+/* ---------- misc ---------- */
+#toast{
+  position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 92px);
+  transform:translateX(-50%) translateY(12px);
+  background:#000d; color:#fff; padding:11px 18px; border-radius:999px;
+  font-size:13.5px; z-index:60; opacity:0; transition:.22s; pointer-events:none;
+  max-width:88vw; text-align:center;
+}
+#toast.on{opacity:1; transform:translateX(-50%) translateY(0)}
+#busy{
+  position:fixed; inset:0; z-index:70; background:rgba(0,0,0,.6);
+  display:none; place-items:center; color:#fff; text-align:center;
+}
+#busy.on{display:grid}
+#busy .box{background:var(--panel);color:var(--fg);padding:22px 28px;border-radius:16px;min-width:200px}
+.bar{height:6px;background:var(--panel2);border-radius:99px;overflow:hidden;margin-top:12px}
+.bar i{display:block;height:100%;background:var(--accent);width:0;transition:width .2s}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>문제집 스캐너</h1>
+  <span class="count" id="count">0장</span>
+  <button class="iconbtn" id="btnSettings" title="설정" aria-label="설정">⚙</button>
+</header>
+
+<main>
+  <div id="grid"></div>
+  <div class="empty" id="empty">
+    <div class="big">📚</div>
+    <b>푼 문제집을 찍어서 PDF 한 개로</b><br>
+    아래 <b>연속 촬영</b>으로 페이지를 계속 찍거나,<br>
+    이미 찍어둔 사진을 <b>불러오기</b> 하세요.<br><br>
+    종이 영역을 자동으로 찾아 <b>반듯하게 펴고</b>,<br>
+    그림자를 지워 <b>한 개의 PDF</b>로 만들어 줍니다.
+  </div>
+</main>
+
+<footer>
+  <button id="btnCam">📷 연속 촬영</button>
+  <button id="btnPick">🖼 불러오기</button>
+  <button id="btnPdf" class="primary">📄 PDF 만들기</button>
+</footer>
+
+<input id="filePick" class="sr" type="file" accept="image/*" multiple>
+<input id="fileShot" class="sr" type="file" accept="image/*" capture="environment">
+
+<!-- 연속 촬영 -->
+<div class="overlay" id="cam" style="background:#000">
+  <div class="camtop">
+    <span id="camHint">종이 전체가 화면에 들어오게 찍으세요</span>
+  </div>
+  <video id="video" playsinline muted autoplay></video>
+  <div class="cambottom">
+    <span class="camcount" id="camCount">0장</span>
+    <button id="shutter" aria-label="촬영"></button>
+    <button class="done" id="camDone">완료</button>
+  </div>
+  <div class="flash" id="flash"></div>
+</div>
+
+<!-- 잘라내기 편집 -->
+<div class="overlay" id="editor">
+  <div class="top">
+    <span class="title" id="edTitle">페이지 편집</span>
+    <span class="sp"></span>
+    <button class="iconbtn" id="edRotate" title="회전">⟳</button>
+    <button class="iconbtn" id="edClose" title="닫기">✕</button>
+  </div>
+  <div class="stage">
+    <div id="cropHost">
+      <img id="cropImg" alt="">
+      <svg id="cropSvg"><polygon id="cropPoly" points=""></polygon></svg>
+    </div>
+  </div>
+  <div class="bottom">
+    <div class="seg" id="edFilter">
+      <button data-f="doc">문서(기본)</button>
+      <button data-f="bw">흑백 강조</button>
+      <button data-f="photo">원본</button>
+    </div>
+    <div class="actions">
+      <button id="edFull">전체 사용</button>
+      <button id="edAuto">자동 감지</button>
+      <button id="edApply" class="primary">적용</button>
+    </div>
+  </div>
+</div>
+
+<!-- 설정 -->
+<div class="overlay" id="settings">
+  <div class="sheet">
+    <h2>설정</h2>
+    <div class="field">
+      <label for="setName">파일 이름</label>
+      <input type="text" id="setName" placeholder="수학문제집">
+    </div>
+    <div class="field">
+      <label for="setDate">이름에 날짜 붙이기</label>
+      <input type="checkbox" id="setDate">
+    </div>
+    <div class="field">
+      <label for="setSplit">한 파일 최대 용량(MB)<br><span style="font-size:11.5px">0 = 나누지 않음</span></label>
+      <input type="number" id="setSplit" min="0" max="200" step="1" style="width:90px">
+    </div>
+    <div class="field">
+      <label>기본 보정</label>
+      <div class="seg" id="setFilter">
+        <button data-f="doc">문서</button>
+        <button data-f="bw">흑백</button>
+        <button data-f="photo">원본</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>화질</label>
+      <div class="seg" id="setQuality">
+        <button data-q="0.72">가벼움</button>
+        <button data-q="0.82">보통</button>
+        <button data-q="0.92">선명</button>
+      </div>
+    </div>
+    <p class="hint">
+      사진은 이 기기 안에서만 처리되고 <b>어디에도 올라가지 않습니다.</b><br>
+      작업 중인 페이지는 자동 저장되어, 실수로 창을 닫아도 다시 열면 남아 있습니다.
+    </p>
+    <div class="actions">
+      <button id="setClear" style="color:var(--danger)">전체 삭제</button>
+      <button id="setClose" class="primary">닫기</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<div id="busy"><div class="box"><div id="busyText">처리 중…</div><div class="bar"><i id="busyBar"></i></div></div></div>
+
+<script>
+"use strict";
+/* =========================================================================
+   문제집 스캐너 — 사진 여러 장을 반듯한 PDF 한 개로
+   전부 브라우저 안에서 처리됩니다(서버 전송 없음).
+   ========================================================================= */
+
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+const SRC_MAX = 2000;   // 보관용 원본 최대 변 길이(px)
+const OUT_MAX = 1700;   // 보정 결과 최대 변 길이(px)
+
+const state = {
+  pages: [],                       // {id, srcBlob, outBlob, url, corners, rot, filter, busy}
+  settings: {
+    name: "문제집", withDate: true, splitMB: 0, filter: "doc", quality: 0.82
+  }
+};
+
+/* ---------------------------------------------------------------- toast/busy */
+let toastTimer;
+function toast(msg, ms = 2200) {
+  const t = $("#toast");
+  t.textContent = msg; t.classList.add("on");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("on"), ms);
+}
+function busy(on, text = "처리 중…", pct = null) {
+  $("#busy").classList.toggle("on", on);
+  $("#busyText").textContent = text;
+  $("#busyBar").style.width = pct == null ? "0%" : `${Math.round(pct * 100)}%`;
+}
+const nextFrame = () => new Promise(r => requestAnimationFrame(() => r()));
+
+/* ================================================================= 저장소 */
+const DB = (() => {
+  let dbp = null;
+  function open() {
+    if (dbp) return dbp;
+    dbp = new Promise((res, rej) => {
+      const rq = indexedDB.open("workbook-scanner", 1);
+      rq.onupgradeneeded = () => {
+        const db = rq.result;
+        if (!db.objectStoreNames.contains("pages")) db.createObjectStore("pages", { keyPath: "id" });
+        if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta");
+      };
+      rq.onsuccess = () => res(rq.result);
+      rq.onerror = () => rej(rq.error);
+    }).catch(() => null);
+    return dbp;
+  }
+  async function tx(store, mode, fn) {
+    const db = await open();
+    if (!db) return null;
+    return new Promise((res, rej) => {
+      const t = db.transaction(store, mode);
+      const out = fn(t.objectStore(store));
+      t.oncomplete = () => res(out && "result" in out ? out.result : out);
+      t.onerror = () => rej(t.error);
+    }).catch(() => null);
+  }
+  return {
+    savePage: (p, order) => tx("pages", "readwrite", s => s.put({
+      id: p.id, order, srcBlob: p.srcBlob, outBlob: p.outBlob,
+      corners: p.corners, rot: p.rot, filter: p.filter
+    })),
+    delPage: id => tx("pages", "readwrite", s => s.delete(id)),
+    clearPages: () => tx("pages", "readwrite", s => s.clear()),
+    allPages: () => tx("pages", "readonly", s => s.getAll()),
+    saveSettings: v => tx("meta", "readwrite", s => s.put(v, "settings")),
+    loadSettings: () => tx("meta", "readonly", s => s.get("settings")),
+  };
+})();
+
+async function persistOrder() {
+  for (let i = 0; i < state.pages.length; i++) await DB.savePage(state.pages[i], i);
+}
+
+/* ================================================== 이미지 기본 유틸 */
+async function blobToCanvas(blob, maxDim) {
+  let bmp;
+  try { bmp = await createImageBitmap(blob, { imageOrientation: "from-image" }); }
+  catch { bmp = await createImageBitmap(blob); }
+  const s = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * s));
+  const h = Math.max(1, Math.round(bmp.height * s));
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  c.getContext("2d").drawImage(bmp, 0, 0, w, h);
+  if (bmp.close) bmp.close();
+  return c;
+}
+function canvasToBlob(canvas, quality) {
+  return new Promise(res => canvas.toBlob(res, "image/jpeg", quality));
+}
+
+/* ============================================ 1) 종이 영역 자동 감지 */
+function otsu(gray) {
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < gray.length; i++) hist[gray[i]]++;
+  const total = gray.length;
+  let sum = 0;
+  for (let i = 0; i < 256; i++) sum += i * hist[i];
+  let sumB = 0, wB = 0, best = 0, thr = 128;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]; if (!wB) continue;
+    const wF = total - wB; if (!wF) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB, mF = (sum - sumB) / wF;
+    const v = wB * wF * (mB - mF) * (mB - mF);
+    if (v > best) { best = v; thr = t; }
+  }
+  return thr;
+}
+
+/**
+ * 밝은(종이) 영역 중 가장 큰 덩어리를 찾아 네 꼭짓점을 추정한다.
+ * @returns {[number,number][]|null} [TL,TR,BR,BL] (canvas 좌표) 또는 null(=감지 실패/전체 사용)
+ */
+function detectCorners(canvas) {
+  const D = 480;
+  const s = Math.min(1, D / Math.max(canvas.width, canvas.height));
+  const w = Math.max(4, Math.round(canvas.width * s));
+  const h = Math.max(4, Math.round(canvas.height * s));
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  c.getContext("2d").drawImage(canvas, 0, 0, w, h);
+  const d = c.getContext("2d").getImageData(0, 0, w, h).data;
+
+  const n = w * h;
+  const gray = new Uint8Array(n);
+  for (let i = 0, p = 0; i < n; i++, p += 4)
+    gray[i] = (d[p] * 299 + d[p + 1] * 587 + d[p + 2] * 114) / 1000 | 0;
+
+  const thr = otsu(gray);
+
+  // 밝은 픽셀의 연결 요소 라벨링(4-이웃), 가장 큰 덩어리 찾기
+  const label = new Int32Array(n);
+  const stack = new Int32Array(n);
+  let cur = 0, bestLabel = 0, bestSize = 0;
+  for (let i = 0; i < n; i++) {
+    if (label[i] || gray[i] <= thr) continue;
+    cur++;
+    let sp = 0, size = 0;
+    stack[sp++] = i; label[i] = cur;
+    while (sp) {
+      const p = stack[--sp]; size++;
+      const x = p % w, y = (p / w) | 0;
+      if (x > 0     && !label[p - 1] && gray[p - 1] > thr) { label[p - 1] = cur; stack[sp++] = p - 1; }
+      if (x < w - 1 && !label[p + 1] && gray[p + 1] > thr) { label[p + 1] = cur; stack[sp++] = p + 1; }
+      if (y > 0     && !label[p - w] && gray[p - w] > thr) { label[p - w] = cur; stack[sp++] = p - w; }
+      if (y < h - 1 && !label[p + w] && gray[p + w] > thr) { label[p + w] = cur; stack[sp++] = p + w; }
+    }
+    if (size > bestSize) { bestSize = size; bestLabel = cur; }
+  }
+  if (!bestLabel) return null;
+  const ratio = bestSize / n;
+  if (ratio > 0.92) return null;   // 이미 종이가 화면을 꽉 채움 → 자를 필요 없음
+  if (ratio < 0.12) return null;   // 종이를 못 찾음
+
+  // 극점으로 사각형 꼭짓점 추정
+  let tl = null, tr = null, br = null, bl = null;
+  let minSum = Infinity, maxSum = -Infinity, minDif = Infinity, maxDif = -Infinity;
+  for (let i = 0; i < n; i++) {
+    if (label[i] !== bestLabel) continue;
+    const x = i % w, y = (i / w) | 0;
+    const sum = x + y, dif = x - y;
+    if (sum < minSum) { minSum = sum; tl = [x, y]; }
+    if (sum > maxSum) { maxSum = sum; br = [x, y]; }
+    if (dif > maxDif) { maxDif = dif; tr = [x, y]; }
+    if (dif < minDif) { minDif = dif; bl = [x, y]; }
+  }
+  const quad = [tl, tr, br, bl];
+  if (quad.some(p => !p)) return null;
+
+  // 사각형 면적이 지나치게 작으면 신뢰하지 않음
+  let area = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = quad[i], b = quad[(i + 1) % 4];
+    area += a[0] * b[1] - b[0] * a[1];
+  }
+  if (Math.abs(area) / 2 < 0.2 * n) return null;
+
+  // 변이 너무 짧은(찌그러진) 결과 거르기
+  const edges = [dist(tl, tr), dist(tr, br), dist(br, bl), dist(bl, tl)];
+  if (Math.min(...edges) < 0.1 * Math.max(w, h)) return null;
+
+  return quad.map(p => [p[0] / s, p[1] / s]);
+}
+
+/* ================================== 2) 원근 보정(사다리꼴 → 직사각형) */
+function solve(A, b, n) {
+  for (let col = 0; col < n; col++) {
+    let piv = col;
+    for (let r = col + 1; r < n; r++) if (Math.abs(A[r][col]) > Math.abs(A[piv][col])) piv = r;
+    if (Math.abs(A[piv][col]) < 1e-12) return null;
+    [A[col], A[piv]] = [A[piv], A[col]];
+    [b[col], b[piv]] = [b[piv], b[col]];
+    for (let r = 0; r < n; r++) {
+      if (r === col) continue;
+      const f = A[r][col] / A[col][col];
+      if (!f) continue;
+      for (let k = col; k < n; k++) A[r][k] -= f * A[col][k];
+      b[r] -= f * b[col];
+    }
+  }
+  const x = new Float64Array(n);
+  for (let i = 0; i < n; i++) x[i] = b[i] / A[i][i];
+  return x;
+}
+
+/** dst(직사각형) → src(사진 속 사각형) 로 보내는 호모그래피 계수 */
+function homography(dst, src) {
+  const A = [], b = [];
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = dst[i], [u, v] = src[i];
+    A.push([x, y, 1, 0, 0, 0, -x * u, -y * u]); b.push(u);
+    A.push([0, 0, 0, x, y, 1, -x * v, -y * v]); b.push(v);
+  }
+  return solve(A, b, 8);
+}
+
+/**
+ * 사진 속 사다리꼴만 보고 "원래 종이의 가로/세로 비"를 복원한다.
+ *
+ * 변 길이 평균만 쓰면 원근으로 눌린 비율이 그대로 남는다(비스듬히 찍으면 10% 이상 오차).
+ * 단위 정사각형 → 사각형 호모그래피 H를 구하고 K=diag(f,f,1)라 두면,
+ * 종이가 직사각형이라는 조건은 K⁻¹H의 두 열 b1,b2 에 대해
+ *   b1·b2 = 0      (직각)      → 초점거리 f 를 결정
+ *   |b1|/|b2| = 비율            → 가로/세로
+ * 로 나뉜다. 위/아래 변이 화면에서 평행하면(정면으로 좌우 회전 없이 찍은 흔한 경우)
+ * f 는 원리적으로 구할 수 없으므로 휴대폰 표준 화각을 가정해 넣는다.
+ * 비율 자체는 f 에 둔감해서 이 가정으로도 충분히 정확하다.
+ */
+function estimateAspect(corners, imgW, imgH) {
+  const u0 = imgW / 2, v0 = imgH / 2;
+  const q = corners.map(p => [p[0] - u0, p[1] - v0]);          // 주점을 원점으로
+  const H = homography([[0, 0], [1, 0], [1, 1], [0, 1]], q);   // 단위 정사각형 → 사각형
+  if (!H) return null;
+  const [a0, a1, , a3, a4, , a6, a7] = H;
+
+  // b1·b2 = 0  →  (a0*a1 + a3*a4)/f² + a6*a7 = 0
+  let f2 = null;
+  if (Math.abs(a6) > 1e-9 && Math.abs(a7) > 1e-9) {
+    const cand = -(a0 * a1 + a3 * a4) / (a6 * a7);
+    if (cand > 1e-6) f2 = cand;
+  }
+  if (f2 == null) {
+    // 소실점이 무한대 → f 를 구할 수 없음. 일반적인 휴대폰 화각(약 70°)으로 가정.
+    const f = 0.75 * Math.max(imgW, imgH);
+    f2 = f * f;
+  }
+
+  const n1 = (a0 * a0 + a3 * a3) / f2 + a6 * a6;   // |b1|²
+  const n2 = (a1 * a1 + a4 * a4) / f2 + a7 * a7;   // |b2|²
+  if (!(n1 > 0) || !(n2 > 0)) return null;
+
+  const a = Math.sqrt(n1 / n2);                    // 가로/세로
+  return (a > 0.15 && a < 6) ? a : null;
+}
+
+/** corners 로 잘라 반듯하게 편 ImageData 반환 */
+function warp(srcCanvas, corners, maxOut) {
+  const [tl, tr, br, bl] = corners;
+  let W = Math.round((dist(tl, tr) + dist(bl, br)) / 2);
+  let H = Math.round((dist(tl, bl) + dist(tr, br)) / 2);
+
+  // 원근으로 눌린 비율을 실제 종이 비율로 교정(넓이는 유지)
+  const asp = estimateAspect(corners, srcCanvas.width, srcCanvas.height);
+  if (asp) {
+    const area = Math.max(1, W * H);
+    H = Math.round(Math.sqrt(area / asp));
+    W = Math.round(asp * H);
+  }
+
+  const s = Math.min(1, maxOut / Math.max(W, H));
+  W = Math.max(16, Math.round(W * s));
+  H = Math.max(16, Math.round(H * s));
+
+  const hm = homography([[0, 0], [W, 0], [W, H], [0, H]], corners);
+  if (!hm) return null;
+  const [a0, a1, a2, a3, a4, a5, a6, a7] = hm;
+
+  const sctx = srcCanvas.getContext("2d", { willReadFrequently: true });
+  const sw = srcCanvas.width, sh = srcCanvas.height;
+  const sd = sctx.getImageData(0, 0, sw, sh).data;
+  const out = new ImageData(W, H);
+  const od = out.data;
+
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const den = a6 * x + a7 * y + 1;
+      const u = (a0 * x + a1 * y + a2) / den;
+      const v = (a3 * x + a4 * y + a5) / den;
+      const o = (y * W + x) * 4;
+      if (u < 0 || v < 0 || u > sw - 1 || v > sh - 1) { od[o] = od[o+1] = od[o+2] = 255; od[o+3] = 255; continue; }
+      const x0 = u | 0, y0 = v | 0;
+      const x1 = x0 + 1 > sw - 1 ? x0 : x0 + 1;
+      const y1 = y0 + 1 > sh - 1 ? y0 : y0 + 1;
+      const fx = u - x0, fy = v - y0;
+      const i00 = (y0 * sw + x0) * 4, i10 = (y0 * sw + x1) * 4;
+      const i01 = (y1 * sw + x0) * 4, i11 = (y1 * sw + x1) * 4;
+      const w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy);
+      const w01 = (1 - fx) * fy,       w11 = fx * fy;
+      for (let ch = 0; ch < 3; ch++)
+        od[o + ch] = sd[i00 + ch] * w00 + sd[i10 + ch] * w10 + sd[i01 + ch] * w01 + sd[i11 + ch] * w11;
+      od[o + 3] = 255;
+    }
+  }
+  return out;
+}
+
+/* ============================== 3) 그림자 제거 + 글씨 또렷하게 */
+function boxMean(gray, w, h, r) {
+  const iw = w + 1;
+  const ii = new Float64Array(iw * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let row = 0;
+    for (let x = 0; x < w; x++) {
+      row += gray[y * w + x];
+      ii[(y + 1) * iw + x + 1] = ii[y * iw + x + 1] + row;
+    }
+  }
+  const out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(w - 1, x + r);
+      const sum = ii[(y1 + 1) * iw + x1 + 1] - ii[y0 * iw + x1 + 1]
+                - ii[(y1 + 1) * iw + x0]     + ii[y0 * iw + x0];
+      out[y * w + x] = sum / ((y1 - y0 + 1) * (x1 - x0 + 1));
+    }
+  }
+  return out;
+}
+
+/**
+ * 배경(종이) 밝기를 국소 평균으로 추정해 나눠주면 그림자/조명 얼룩이 사라진다.
+ * 채널별로 같은 배경값을 쓰기 때문에 빨간 펜 같은 색은 색을 유지한다.
+ */
+function enhance(img, mode) {
+  if (mode === "photo") return img;
+  const { width: w, height: h, data: d } = img;
+  const n = w * h;
+  const gray = new Uint8Array(n);
+  for (let i = 0, p = 0; i < n; i++, p += 4)
+    gray[i] = (d[p] * 299 + d[p + 1] * 587 + d[p + 2] * 114) / 1000 | 0;
+
+  const r = Math.max(8, Math.round(Math.min(w, h) / 22));
+  const bg = boxMean(gray, w, h, r);
+  const gamma = mode === "bw" ? 2.6 : 1.45;
+
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    const base = Math.max(24, bg[i]);
+    if (mode === "bw") {
+      const t = Math.pow(clamp(gray[i] / base, 0, 1), gamma) * 255;
+      d[p] = d[p + 1] = d[p + 2] = t;
+    } else {
+      for (let ch = 0; ch < 3; ch++)
+        d[p + ch] = Math.pow(clamp(d[p + ch] / base, 0, 1), gamma) * 255;
+    }
+  }
+  return img;
+}
+
+/* ========================================== 4) 한 장 처리 파이프라인 */
+async function renderPage(page) {
+  const src = await blobToCanvas(page.srcBlob, SRC_MAX);
+
+  if (page.corners === undefined) page.corners = detectCorners(src);
+
+  let img;
+  if (page.corners) {
+    img = warp(src, page.corners, OUT_MAX);
+  }
+  if (!img) {
+    const s = Math.min(1, OUT_MAX / Math.max(src.width, src.height));
+    const w = Math.max(1, Math.round(src.width * s)), h = Math.max(1, Math.round(src.height * s));
+    const c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    c.getContext("2d").drawImage(src, 0, 0, w, h);
+    img = c.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, w, h);
+  }
+
+  enhance(img, page.filter);
+
+  const flat = document.createElement("canvas");
+  flat.width = img.width; flat.height = img.height;
+  flat.getContext("2d").putImageData(img, 0, 0);
+
+  const rot = ((page.rot % 360) + 360) % 360;
+  let final = flat;
+  if (rot) {
+    const swap = rot === 90 || rot === 270;
+    final = document.createElement("canvas");
+    final.width = swap ? flat.height : flat.width;
+    final.height = swap ? flat.width : flat.height;
+    const ctx = final.getContext("2d");
+    ctx.translate(final.width / 2, final.height / 2);
+    ctx.rotate(rot * Math.PI / 180);
+    ctx.drawImage(flat, -flat.width / 2, -flat.height / 2);
+  }
+
+  page.outBlob = await canvasToBlob(final, state.settings.quality);
+  if (page.url) URL.revokeObjectURL(page.url);
+  page.url = URL.createObjectURL(page.outBlob);
+  return page;
+}
+
+/* ================================================== 페이지 추가/관리 */
+let idSeq = Date.now();
+const newId = () => `p${idSeq++}`;
+
+async function addFiles(files) {
+  const list = Array.from(files)
+    .filter(f => f.type.startsWith("image/"))
+    .sort((a, b) =>
+      a.name.localeCompare(b.name, "ko", { numeric: true }) || a.lastModified - b.lastModified);
+  if (!list.length) { toast("이미지 파일이 없어요"); return; }
+
+  const added = [];
+  for (const f of list) {
+    const page = {
+      id: newId(), srcBlob: f, outBlob: null, url: null,
+      corners: undefined, rot: 0, filter: state.settings.filter, busy: true
+    };
+    state.pages.push(page); added.push(page);
+  }
+  render();
+
+  for (let i = 0; i < added.length; i++) {
+    busy(true, `보정 중… ${i + 1}/${added.length}`, (i) / added.length);
+    await nextFrame();
+    const p = added[i];
+    try {
+      // 원본을 적당한 크기로 줄여 보관(용량/속도)
+      const srcCanvas = await blobToCanvas(p.srcBlob, SRC_MAX);
+      p.srcBlob = await canvasToBlob(srcCanvas, 0.9);
+      await renderPage(p);
+    } catch (e) {
+      console.error(e);
+      toast("사진 한 장을 읽지 못했어요");
+    }
+    p.busy = false;
+    render();
+    await DB.savePage(p, state.pages.indexOf(p));
+  }
+  busy(false);
+  await persistOrder();
+  toast(`${added.length}장 추가됨`);
+}
+
+async function reprocess(page) {
+  page.busy = true; render();
+  busy(true, "다시 보정 중…");
+  await nextFrame();
+  try { await renderPage(page); } catch (e) { console.error(e); }
+  page.busy = false;
+  busy(false); render();
+  await DB.savePage(page, state.pages.indexOf(page));
+}
+
+function movePage(idx, dir) {
+  const j = idx + dir;
+  if (j < 0 || j >= state.pages.length) return;
+  const [p] = state.pages.splice(idx, 1);
+  state.pages.splice(j, 0, p);
+  render();
+  persistOrder();
+}
+
+async function removePage(idx) {
+  const p = state.pages[idx];
+  if (!confirm(`${idx + 1}번 페이지를 삭제할까요?`)) return;
+  if (p.url) URL.revokeObjectURL(p.url);
+  state.pages.splice(idx, 1);
+  render();
+  await DB.delPage(p.id);
+  await persistOrder();
+}
+
+/* =============================================================== 렌더 */
+function render() {
+  const grid = $("#grid");
+  grid.innerHTML = "";
+  $("#empty").style.display = state.pages.length ? "none" : "";
+  $("#count").textContent = `${state.pages.length}장`;
+  $("#btnPdf").disabled = state.pages.length === 0;
+
+  state.pages.forEach((p, i) => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="thumbwrap">
+        <span class="num">${i + 1}</span>
+        ${p.busy || !p.url ? `<div class="spin">보정 중…</div>` : `<img alt="${i + 1}번 페이지" src="${p.url}">`}
+      </div>
+      <div class="row">
+        <button data-a="left"  title="앞으로">◀</button>
+        <button data-a="edit"  title="편집">✎</button>
+        <button data-a="right" title="뒤로">▶</button>
+        <button data-a="del" class="del" title="삭제">🗑</button>
+      </div>`;
+    card.querySelector('[data-a="left"]').onclick = () => movePage(i, -1);
+    card.querySelector('[data-a="right"]').onclick = () => movePage(i, 1);
+    card.querySelector('[data-a="del"]').onclick = () => removePage(i);
+    card.querySelector('[data-a="edit"]').onclick = () => openEditor(i);
+    const img = card.querySelector("img");
+    if (img) img.onclick = () => openEditor(i);
+    grid.appendChild(card);
+  });
+}
+
+/* ====================================================== 잘라내기 편집 */
+const ed = { idx: -1, corners: null, src: null, imgUrl: null, scale: 1, filter: "doc", rot: 0 };
+
+async function openEditor(idx) {
+  const p = state.pages[idx];
+  if (p.busy) return;
+  ed.idx = idx; ed.filter = p.filter; ed.rot = p.rot;
+
+  busy(true, "여는 중…");
+  ed.src = await blobToCanvas(p.srcBlob, SRC_MAX);
+  if (ed.imgUrl) URL.revokeObjectURL(ed.imgUrl);
+  ed.imgUrl = URL.createObjectURL(p.srcBlob);
+
+  const im = $("#cropImg");
+  await new Promise(res => { im.onload = res; im.src = ed.imgUrl; });
+
+  ed.corners = p.corners
+    ? p.corners.map(c => c.slice())
+    : [[0, 0], [ed.src.width, 0], [ed.src.width, ed.src.height], [0, ed.src.height]];
+
+  $("#edTitle").textContent = `${idx + 1}번 페이지`;
+  $$("#edFilter button").forEach(b => b.classList.toggle("sel", b.dataset.f === ed.filter));
+  $("#editor").classList.add("on");
+  busy(false);
+  requestAnimationFrame(layoutCrop);
+}
+
+function layoutCrop() {
+  const im = $("#cropImg");
+  const host = $("#cropHost");
+  host.style.width = im.clientWidth + "px";
+  host.style.height = im.clientHeight + "px";
+  ed.scale = im.clientWidth / ed.src.width;
+  drawCrop();
+}
+
+function drawCrop() {
+  const host = $("#cropHost");
+  $$(".handle", host).forEach(h => h.remove());
+  const pts = ed.corners.map(c => [c[0] * ed.scale, c[1] * ed.scale]);
+  $("#cropPoly").setAttribute("points", pts.map(p => p.join(",")).join(" "));
+  pts.forEach((p, i) => {
+    const h = document.createElement("div");
+    h.className = "handle";
+    h.style.left = p[0] + "px";
+    h.style.top = p[1] + "px";
+    h.onpointerdown = e => startDrag(e, i);
+    host.appendChild(h);
+  });
+}
+
+function startDrag(e, i) {
+  e.preventDefault();
+  const host = $("#cropHost");
+  const move = ev => {
+    const r = host.getBoundingClientRect();
+    const x = clamp((ev.clientX - r.left) / ed.scale, 0, ed.src.width);
+    const y = clamp((ev.clientY - r.top) / ed.scale, 0, ed.src.height);
+    ed.corners[i] = [x, y];
+    drawCrop();
+  };
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+
+function closeEditor() {
+  $("#editor").classList.remove("on");
+  if (ed.imgUrl) { URL.revokeObjectURL(ed.imgUrl); ed.imgUrl = null; }
+  ed.src = null;
+}
+
+/* ========================================================= PDF 만들기 */
+/**
+ * JPEG들을 A4 페이지에 채워 넣은 PDF 바이트를 만든다.
+ * 외부 라이브러리 없이 PDF 1.4 구조를 직접 작성한다.
+ */
+function buildPdf(images) {           // images: [{bytes, w, h}]
+  const enc = new TextEncoder();
+  const chunks = [];
+  let len = 0;
+  const put = v => {
+    const u = typeof v === "string" ? enc.encode(v) : v;
+    chunks.push(u); len += u.length;
+  };
+
+  const A4W = 595.28, A4H = 841.89, MARGIN = 14;
+  const objects = [];                 // 1-based: objects[i] = 오프셋
+  const nPages = images.length;
+  // 1 = Catalog, 2 = Pages, 이후 페이지마다 3개(Page, Contents, Image)
+  const pageObj = i => 3 + i * 3;
+  const contObj = i => 4 + i * 3;
+  const imgObj  = i => 5 + i * 3;
+  const total = 2 + nPages * 3;
+
+  put(new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a,   // %PDF-1.4
+                      0x25, 0xe2, 0xe3, 0xcf, 0xd3, 0x0a]));
+
+  const begin = num => { objects[num] = len; put(`${num} 0 obj\n`); };
+  const end = () => put("endobj\n");
+
+  begin(1);
+  put("<< /Type /Catalog /Pages 2 0 R >>\n"); end();
+
+  begin(2);
+  put(`<< /Type /Pages /Count ${nPages} /Kids [${
+    images.map((_, i) => `${pageObj(i)} 0 R`).join(" ")}] >>\n`); end();
+
+  images.forEach((im, i) => {
+    // 여백 안에 비율 유지하며 최대로 배치
+    const availW = A4W - MARGIN * 2, availH = A4H - MARGIN * 2;
+    const sc = Math.min(availW / im.w, availH / im.h);
+    const dw = im.w * sc, dh = im.h * sc;
+    const dx = (A4W - dw) / 2, dy = (A4H - dh) / 2;
+
+    begin(pageObj(i));
+    put(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${A4W.toFixed(2)} ${A4H.toFixed(2)}] ` +
+        `/Resources << /XObject << /Im0 ${imgObj(i)} 0 R >> >> /Contents ${contObj(i)} 0 R >>\n`);
+    end();
+
+    const content = `q\n${dw.toFixed(2)} 0 0 ${dh.toFixed(2)} ${dx.toFixed(2)} ${dy.toFixed(2)} cm\n/Im0 Do\nQ\n`;
+    begin(contObj(i));
+    put(`<< /Length ${enc.encode(content).length} >>\nstream\n`);
+    put(content);
+    put("endstream\n"); end();
+
+    begin(imgObj(i));
+    put(`<< /Type /XObject /Subtype /Image /Width ${im.w} /Height ${im.h} ` +
+        `/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${im.bytes.length} >>\nstream\n`);
+    put(im.bytes);
+    put("\nendstream\n"); end();
+  });
+
+  const xref = len;
+  put(`xref\n0 ${total + 1}\n`);
+  put("0000000000 65535 f \n");
+  for (let i = 1; i <= total; i++)
+    put(`${String(objects[i]).padStart(10, "0")} 00000 n \n`);
+  put(`trailer\n<< /Size ${total + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+
+  const out = new Uint8Array(len);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
+async function makePdf() {
+  if (!state.pages.length) return;
+  if (state.pages.some(p => p.busy)) { toast("아직 보정 중인 페이지가 있어요"); return; }
+
+  busy(true, "PDF 만드는 중…", 0);
+  await nextFrame();
+
+  const imgs = [];
+  for (let i = 0; i < state.pages.length; i++) {
+    const p = state.pages[i];
+    busy(true, `PDF 만드는 중… ${i + 1}/${state.pages.length}`, i / state.pages.length);
+    await nextFrame();
+    const bytes = new Uint8Array(await p.outBlob.arrayBuffer());
+    const bmp = await createImageBitmap(p.outBlob);
+    imgs.push({ bytes, w: bmp.width, h: bmp.height });
+    if (bmp.close) bmp.close();
+  }
+
+  // 용량 제한이 있으면 여러 개로 나눔
+  const limit = (state.settings.splitMB || 0) * 1024 * 1024;
+  const groups = [];
+  if (limit > 0) {
+    let cur = [], sz = 0;
+    for (const im of imgs) {
+      if (cur.length && sz + im.bytes.length > limit) { groups.push(cur); cur = []; sz = 0; }
+      cur.push(im); sz += im.bytes.length;
+    }
+    if (cur.length) groups.push(cur);
+  } else groups.push(imgs);
+
+  const base = (state.settings.name || "문제집").trim().replace(/[\\/:*?"<>|]/g, "_") || "문제집";
+  const date = new Date().toISOString().slice(0, 10);
+  const files = groups.map((g, i) => {
+    const bytes = buildPdf(g);
+    const suffix = groups.length > 1 ? `_${i + 1}` : "";
+    const name = `${base}${state.settings.withDate ? "_" + date : ""}${suffix}.pdf`;
+    return new File([bytes], name, { type: "application/pdf" });
+  });
+
+  busy(false);
+  await deliver(files);
+}
+
+async function deliver(files) {
+  const total = files.reduce((s, f) => s + f.size, 0);
+  const mb = (total / 1024 / 1024).toFixed(1);
+
+  if (navigator.canShare && navigator.canShare({ files })) {
+    try {
+      await navigator.share({ files, title: files[0].name, text: "문제집 스캔본입니다." });
+      toast(`전송 완료 (${files.length}개, ${mb}MB)`);
+      return;
+    } catch (e) {
+      if (e && e.name === "AbortError") return;   // 사용자가 취소
+    }
+  }
+  for (const f of files) {
+    const url = URL.createObjectURL(f);
+    const a = document.createElement("a");
+    a.href = url; a.download = f.name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    await new Promise(r => setTimeout(r, 350));
+  }
+  toast(`PDF ${files.length}개 저장됨 (${mb}MB)`);
+}
+
+/* ========================================================= 연속 촬영 */
+const cam = { stream: null, count: 0 };
+
+async function openCam() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    $("#fileShot").click(); return;                      // 카메라 앱으로 대체
+  }
+  try {
+    cam.stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 2400 }, height: { ideal: 3200 } },
+      audio: false
+    });
+  } catch (e) {
+    toast("카메라를 열 수 없어 촬영 앱으로 대체합니다");
+    $("#fileShot").click(); return;
+  }
+  cam.count = 0;
+  $("#camCount").textContent = "0장";
+  const v = $("#video");
+  v.srcObject = cam.stream;
+  await v.play().catch(() => {});
+  $("#cam").classList.add("on");
+}
+
+function closeCam() {
+  $("#cam").classList.remove("on");
+  if (cam.stream) { cam.stream.getTracks().forEach(t => t.stop()); cam.stream = null; }
+  $("#video").srcObject = null;
+}
+
+const shotQueue = [];
+let draining = false;
+
+async function shoot() {
+  const v = $("#video");
+  if (!v.videoWidth) return;
+  const c = document.createElement("canvas");
+  c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext("2d").drawImage(v, 0, 0);
+  const blob = await canvasToBlob(c, 0.92);
+  cam.count++;
+  $("#camCount").textContent = `${cam.count}장`;
+  const f = $("#flash");
+  f.classList.add("on");
+  setTimeout(() => f.classList.remove("on"), 20);
+  shotQueue.push(new File([blob], `shot_${String(cam.count).padStart(3, "0")}.jpg`, { type: "image/jpeg" }));
+  drainShots();
+}
+
+// 촬영은 막지 않고, 뒤에서 한 장씩 조용히 보정한다
+async function drainShots() {
+  if (draining) return;
+  draining = true;
+  while (shotQueue.length) {
+    const f = shotQueue.shift();
+    const page = {
+      id: newId(), srcBlob: f, outBlob: null, url: null,
+      corners: undefined, rot: 0, filter: state.settings.filter, busy: true
+    };
+    state.pages.push(page); render();
+    try {
+      const srcCanvas = await blobToCanvas(page.srcBlob, SRC_MAX);
+      page.srcBlob = await canvasToBlob(srcCanvas, 0.9);
+      await renderPage(page);
+    } catch (e) { console.error(e); }
+    page.busy = false; render();
+    await DB.savePage(page, state.pages.indexOf(page));
+  }
+  draining = false;
+}
+
+/* =============================================================== 설정 */
+function openSettings() {
+  const s = state.settings;
+  $("#setName").value = s.name;
+  $("#setDate").checked = s.withDate;
+  $("#setSplit").value = s.splitMB;
+  $$("#setFilter button").forEach(b => b.classList.toggle("sel", b.dataset.f === s.filter));
+  $$("#setQuality button").forEach(b => b.classList.toggle("sel", +b.dataset.q === s.quality));
+  $("#settings").classList.add("on");
+}
+async function saveSettings() {
+  const s = state.settings;
+  s.name = $("#setName").value;
+  s.withDate = $("#setDate").checked;
+  s.splitMB = clamp(parseInt($("#setSplit").value || "0", 10) || 0, 0, 200);
+  await DB.saveSettings(s);
+}
+
+/* ============================================================ 이벤트 */
+$("#btnPick").onclick = () => $("#filePick").click();
+$("#btnCam").onclick = openCam;
+$("#btnPdf").onclick = makePdf;
+
+$("#filePick").onchange = e => { addFiles(e.target.files); e.target.value = ""; };
+$("#fileShot").onchange = e => { addFiles(e.target.files); e.target.value = ""; };
+
+$("#shutter").onclick = shoot;
+$("#camDone").onclick = () => { closeCam(); if (state.pages.length) toast("순서를 확인하고 PDF를 만드세요"); };
+
+$("#edClose").onclick = closeEditor;
+$("#edFull").onclick = () => {
+  ed.corners = [[0, 0], [ed.src.width, 0], [ed.src.width, ed.src.height], [0, ed.src.height]];
+  drawCrop();
+};
+$("#edAuto").onclick = () => {
+  const c = detectCorners(ed.src);
+  if (!c) { toast("종이를 찾지 못했어요. 직접 맞춰 주세요"); return; }
+  ed.corners = c; drawCrop();
+};
+$("#edRotate").onclick = () => { ed.rot = (ed.rot + 90) % 360; toast(`회전 ${ed.rot}°`); };
+$$("#edFilter button").forEach(b => b.onclick = () => {
+  ed.filter = b.dataset.f;
+  $$("#edFilter button").forEach(x => x.classList.toggle("sel", x === b));
+});
+$("#edApply").onclick = async () => {
+  const p = state.pages[ed.idx];
+  const full = ed.corners[0][0] === 0 && ed.corners[0][1] === 0 &&
+               ed.corners[2][0] === ed.src.width && ed.corners[2][1] === ed.src.height;
+  p.corners = full ? null : ed.corners.map(c => c.slice());
+  p.filter = ed.filter;
+  p.rot = ed.rot;
+  closeEditor();
+  await reprocess(p);
+};
+
+$("#btnSettings").onclick = openSettings;
+$("#setClose").onclick = async () => { await saveSettings(); $("#settings").classList.remove("on"); };
+$$("#setFilter button").forEach(b => b.onclick = () => {
+  state.settings.filter = b.dataset.f;
+  $$("#setFilter button").forEach(x => x.classList.toggle("sel", x === b));
+  saveSettings();
+});
+$$("#setQuality button").forEach(b => b.onclick = () => {
+  state.settings.quality = +b.dataset.q;
+  $$("#setQuality button").forEach(x => x.classList.toggle("sel", x === b));
+  saveSettings();
+});
+$("#setClear").onclick = async () => {
+  if (!confirm("페이지를 전부 삭제할까요?")) return;
+  state.pages.forEach(p => p.url && URL.revokeObjectURL(p.url));
+  state.pages = [];
+  await DB.clearPages();
+  render();
+  $("#settings").classList.remove("on");
+  toast("전체 삭제됨");
+};
+
+window.addEventListener("resize", () => {
+  if ($("#editor").classList.contains("on")) layoutCrop();
+});
+window.addEventListener("beforeunload", e => {
+  if (state.pages.length) { e.preventDefault(); e.returnValue = ""; }
+});
+
+/* ============================================================== 시작 */
+(async function init() {
+  const saved = await DB.loadSettings();
+  if (saved) Object.assign(state.settings, saved);
+
+  const rows = await DB.allPages();
+  if (rows && rows.length) {
+    rows.sort((a, b) => a.order - b.order);
+    state.pages = rows.map(r => ({
+      id: r.id, srcBlob: r.srcBlob, outBlob: r.outBlob,
+      url: r.outBlob ? URL.createObjectURL(r.outBlob) : null,
+      corners: r.corners, rot: r.rot || 0, filter: r.filter || "doc", busy: false
+    }));
+    toast(`이전 작업 ${state.pages.length}장을 불러왔어요`);
+  }
+  render();
+})();
+
+// 테스트/자동화용
+window.__scanner = { state, buildPdf, detectCorners, warp, enhance, addFiles, makePdf, renderPage, estimateAspect, homography };
+</script>
+</body>
+</html>
