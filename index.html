@@ -439,79 +439,408 @@ function otsu(gray) {
   return thr;
 }
 
+/* --- 이진 마스크 닫힘 연산 (적분영상으로 반지름과 무관하게 O(1)/픽셀) --- */
+function maskIntegral(mask, w, h) {
+  const iw = w + 1;
+  const ii = new Int32Array(iw * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let row = 0;
+    for (let x = 0; x < w; x++) {
+      row += mask[y * w + x];
+      ii[(y + 1) * iw + x + 1] = ii[y * iw + x + 1] + row;
+    }
+  }
+  return ii;
+}
+
 /**
- * 밝은(종이) 영역 중 가장 큰 덩어리를 찾아 네 꼭짓점을 추정한다.
- * @returns {[number,number][]|null} [TL,TR,BR,BL] (canvas 좌표) 또는 null(=감지 실패/전체 사용)
+ * 팽창 후 침식(closing). 접힘부 그림자처럼 가느다란 틈을 메워
+ * 갈라진 페이지를 한 덩어리로 만든다.
+ * 가장자리에서는 창을 잘라 쓰므로, 화면 끝에 닿은 종이가 깎이지 않는다.
  */
-function detectCorners(canvas) {
-  const D = 480;
-  const s = Math.min(1, D / Math.max(canvas.width, canvas.height));
-  const w = Math.max(4, Math.round(canvas.width * s));
-  const h = Math.max(4, Math.round(canvas.height * s));
-  const c = document.createElement("canvas");
-  c.width = w; c.height = h;
-  c.getContext("2d").drawImage(canvas, 0, 0, w, h);
-  const d = c.getContext("2d").getImageData(0, 0, w, h).data;
+function closeMask(mask, w, h, r) {
+  const iw = w + 1;
+  const step = (src, needAll) => {
+    const ii = maskIntegral(src, w, h);
+    const out = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
+      for (let x = 0; x < w; x++) {
+        const x0 = Math.max(0, x - r), x1 = Math.min(w - 1, x + r);
+        const sum = ii[(y1+1) * iw + x1+1] - ii[y0 * iw + x1+1]
+                  - ii[(y1+1) * iw + x0]   + ii[y0 * iw + x0];
+        out[y * w + x] = needAll ? (sum === (y1-y0+1) * (x1-x0+1) ? 1 : 0)
+                                 : (sum > 0 ? 1 : 0);
+      }
+    }
+    return out;
+  };
+  return step(step(mask, false), true);
+}
 
+/** 가장 큰 연결 덩어리만 남긴다(8-이웃: 대각선으로도 이어짐) */
+function largestBlob(mask, w, h) {
   const n = w * h;
-  const gray = new Uint8Array(n);
-  for (let i = 0, p = 0; i < n; i++, p += 4)
-    gray[i] = (d[p] * 299 + d[p + 1] * 587 + d[p + 2] * 114) / 1000 | 0;
-
-  const thr = otsu(gray);
-
-  // 밝은 픽셀의 연결 요소 라벨링(4-이웃), 가장 큰 덩어리 찾기
-  const label = new Int32Array(n);
-  const stack = new Int32Array(n);
-  let cur = 0, bestLabel = 0, bestSize = 0;
+  const lab = new Int32Array(n), stack = new Int32Array(n);
+  let cur = 0, bestLab = 0, bestSize = 0;
   for (let i = 0; i < n; i++) {
-    if (label[i] || gray[i] <= thr) continue;
+    if (lab[i] || !mask[i]) continue;
     cur++;
     let sp = 0, size = 0;
-    stack[sp++] = i; label[i] = cur;
+    stack[sp++] = i; lab[i] = cur;
     while (sp) {
       const p = stack[--sp]; size++;
       const x = p % w, y = (p / w) | 0;
-      if (x > 0     && !label[p - 1] && gray[p - 1] > thr) { label[p - 1] = cur; stack[sp++] = p - 1; }
-      if (x < w - 1 && !label[p + 1] && gray[p + 1] > thr) { label[p + 1] = cur; stack[sp++] = p + 1; }
-      if (y > 0     && !label[p - w] && gray[p - w] > thr) { label[p - w] = cur; stack[sp++] = p - w; }
-      if (y < h - 1 && !label[p + w] && gray[p + w] > thr) { label[p + w] = cur; stack[sp++] = p + w; }
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const xx = x + dx, yy = y + dy;
+        if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+        const q = yy * w + xx;
+        if (!lab[q] && mask[q]) { lab[q] = cur; stack[sp++] = q; }
+      }
     }
-    if (size > bestSize) { bestSize = size; bestLabel = cur; }
+    if (size > bestSize) { bestSize = size; bestLab = cur; }
   }
-  if (!bestLabel) return null;
-  const ratio = bestSize / n;
-  if (ratio > 0.92) return null;   // 이미 종이가 화면을 꽉 채움 → 자를 필요 없음
-  if (ratio < 0.12) return null;   // 종이를 못 찾음
+  return { lab, bestLab, bestSize };
+}
 
-  // 극점으로 사각형 꼭짓점 추정
-  let tl = null, tr = null, br = null, bl = null;
-  let minSum = Infinity, maxSum = -Infinity, minDif = Infinity, maxDif = -Infinity;
-  for (let i = 0; i < n; i++) {
-    if (label[i] !== bestLabel) continue;
-    const x = i % w, y = (i / w) | 0;
-    const sum = x + y, dif = x - y;
-    if (sum < minSum) { minSum = sum; tl = [x, y]; }
-    if (sum > maxSum) { maxSum = sum; br = [x, y]; }
-    if (dif > maxDif) { maxDif = dif; tr = [x, y]; }
-    if (dif < minDif) { minDif = dif; bl = [x, y]; }
+/** 덩어리의 행·열별 양 끝점 = 경계점 (볼록껍질 꼭짓점은 반드시 이 안에 있다) */
+function borderPoints(lab, bestLab, w, h) {
+  const pts = [];
+  for (let y = 0; y < h; y++) {
+    let l = -1, r = -1;
+    for (let x = 0; x < w; x++) if (lab[y * w + x] === bestLab) { if (l < 0) l = x; r = x; }
+    if (l >= 0) { pts.push([l, y]); if (r !== l) pts.push([r, y]); }
   }
-  const quad = [tl, tr, br, bl];
-  if (quad.some(p => !p)) return null;
+  for (let x = 0; x < w; x++) {
+    let t = -1, b = -1;
+    for (let y = 0; y < h; y++) if (lab[y * w + x] === bestLab) { if (t < 0) t = y; b = y; }
+    if (t >= 0) { pts.push([x, t]); if (b !== t) pts.push([x, b]); }
+  }
+  return pts;
+}
 
-  // 사각형 면적이 지나치게 작으면 신뢰하지 않음
-  let area = 0;
+const cross3 = (o, a, b) => (a[0]-o[0]) * (b[1]-o[1]) - (a[1]-o[1]) * (b[0]-o[0]);
+
+function convexHull(pts) {
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (p.length < 3) return p;
+  const lo = [], up = [];
+  for (const q of p) { while (lo.length >= 2 && cross3(lo[lo.length-2], lo[lo.length-1], q) <= 0) lo.pop(); lo.push(q); }
+  for (let i = p.length - 1; i >= 0; i--) { const q = p[i];
+    while (up.length >= 2 && cross3(up[up.length-2], up[up.length-1], q) <= 0) up.pop(); up.push(q); }
+  lo.pop(); up.pop();
+  return lo.concat(up);
+}
+
+/** 면적을 가장 적게 잃는 꼭짓점부터 지워 껍질을 maxN개로 줄인다 */
+function simplifyHull(hull, maxN) {
+  const h = hull.slice();
+  while (h.length > maxN) {
+    let idx = 0, min = Infinity;
+    for (let i = 0; i < h.length; i++) {
+      const a = h[(i - 1 + h.length) % h.length], b = h[i], c = h[(i + 1) % h.length];
+      const ar = Math.abs(cross3(a, b, c));
+      if (ar < min) { min = ar; idx = i; }
+    }
+    h.splice(idx, 1);
+  }
+  return h;
+}
+
+/** 볼록껍질에서 넓이가 최대인 사각형 네 점 고르기 */
+function maxAreaQuad(hull) {
+  const m = hull.length;
+  if (m < 4) return null;
+  if (m === 4) return hull.slice();
+  const tri = (a, b, c) => Math.abs(cross3(a, b, c));
+  let best = null, bestA = -1;
+  for (let i = 0; i < m - 3; i++)
+    for (let j = i + 1; j < m - 2; j++)
+      for (let k = j + 1; k < m - 1; k++)
+        for (let l = k + 1; l < m; l++) {
+          const a = tri(hull[i], hull[j], hull[k]) + tri(hull[i], hull[k], hull[l]);
+          if (a > bestA) { bestA = a; best = [hull[i], hull[j], hull[k], hull[l]]; }
+        }
+  return best;
+}
+
+/** 점들을 직선으로 최소제곱 근사 → [a,b,c] (ax+by=c, a²+b²=1) */
+function fitLine(pts) {
+  let mx = 0, my = 0;
+  for (const p of pts) { mx += p[0]; my += p[1]; }
+  mx /= pts.length; my /= pts.length;
+  let sxx = 0, syy = 0, sxy = 0;
+  for (const p of pts) {
+    const dx = p[0] - mx, dy = p[1] - my;
+    sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+  }
+  const th = 0.5 * Math.atan2(2 * sxy, sxx - syy);   // 주성분 방향
+  const a = -Math.sin(th), b = Math.cos(th);
+  return [a, b, a * mx + b * my];
+}
+function lineFrom(p, q) {
+  const dx = q[0] - p[0], dy = q[1] - p[1], L = Math.hypot(dx, dy) || 1;
+  const a = -dy / L, b = dx / L;
+  return [a, b, a * p[0] + b * p[1]];
+}
+function lineCross(l1, l2) {
+  const det = l1[0] * l2[1] - l2[0] * l1[1];
+  if (Math.abs(det) < 1e-9) return null;
+  return [(l1[2] * l2[1] - l2[2] * l1[1]) / det, (l1[0] * l2[2] - l2[0] * l1[2]) / det];
+}
+
+/**
+ * 꼭짓점 4개만 쓰지 않고, 각 변에 놓인 경계점 전체를 직선으로 근사한 뒤
+ * 이웃 직선을 교차시켜 꼭짓점을 다시 구한다.
+ * → 손가락·잡티 하나에 모서리가 끌려가지 않고 정확도도 올라간다.
+ */
+function refineQuad(quad, pts) {
+  const lines = [];
+  for (let e = 0; e < 4; e++) {
+    const a = quad[e], b = quad[(e + 1) % 4];
+    const len = dist(a, b) || 1;
+    const tol = Math.max(2.5, len * 0.035);
+    const inl = [];
+    for (const p of pts) {
+      const t = ((p[0]-a[0]) * (b[0]-a[0]) + (p[1]-a[1]) * (b[1]-a[1])) / (len * len);
+      if (t < 0.12 || t > 0.88) continue;                 // 모서리 부근은 제외
+      const d = Math.abs((b[0]-a[0]) * (a[1]-p[1]) - (a[0]-p[0]) * (b[1]-a[1])) / len;
+      if (d < tol) inl.push(p);
+    }
+    lines.push(inl.length >= 10 ? fitLine(inl) : lineFrom(a, b));
+  }
+  const out = [];
+  for (let i = 0; i < 4; i++) {
+    const p = lineCross(lines[(i + 3) % 4], lines[i]);
+    // 원래 꼭짓점에서 너무 멀리 튀면 신뢰하지 않음
+    out.push(p && dist(p, quad[i]) < Math.max(12, dist(quad[i], quad[(i + 1) % 4]) * 0.3) ? p : quad[i]);
+  }
+  return out;
+}
+
+/** [TL, TR, BR, BL] 순서로 정렬 */
+function orderCorners(q) {
+  const cx = (q[0][0]+q[1][0]+q[2][0]+q[3][0]) / 4;
+  const cy = (q[0][1]+q[1][1]+q[2][1]+q[3][1]) / 4;
+  const s = q.slice().sort((a, b) =>
+    Math.atan2(a[1]-cy, a[0]-cx) - Math.atan2(b[1]-cy, b[0]-cx));
+  const xs = q.map(p => p[0]), ys = q.map(p => p[1]);
+  const box = [[Math.min(...xs), Math.min(...ys)], [Math.max(...xs), Math.min(...ys)],
+               [Math.max(...xs), Math.max(...ys)], [Math.min(...xs), Math.max(...ys)]];
+  let best = 0, bestD = Infinity;
+  for (let r = 0; r < 4; r++) {
+    let d = 0;
+    for (let i = 0; i < 4; i++) {
+      const p = s[(r + i) % 4];
+      d += (p[0]-box[i][0]) ** 2 + (p[1]-box[i][1]) ** 2;
+    }
+    if (d < bestD) { bestD = d; best = r; }
+  }
+  return [0, 1, 2, 3].map(i => s[(best + i) % 4]);
+}
+
+const polyArea = q => {
+  let a = 0;
+  for (let i = 0; i < q.length; i++) {
+    const p = q[i], n = q[(i + 1) % q.length];
+    a += p[0] * n[1] - n[0] * p[1];
+  }
+  return Math.abs(a) / 2;
+};
+
+/** 사각형 후보가 얼마나 그럴듯한지 점수화 */
+function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean) {
+  const area = polyArea(quad);
+  const frame = w * h;
+  if (area < 0.045 * frame) return null;                    // 너무 작음
+
+  // 모양 검사: 볼록 + 각 내각이 45°~135° + 변 길이 편차
+  const len = [];
+  for (let i = 0; i < 4; i++) len.push(dist(quad[i], quad[(i + 1) % 4]));
+  if (Math.min(...len) < 0.12 * Math.max(...len)) return null;
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = quad[i], b = quad[(i+1) % 4], c = quad[(i+2) % 4];
+    const cr = cross3(a, b, c);
+    if (sign === 0) sign = Math.sign(cr);
+    else if (Math.sign(cr) !== sign) return null;           // 오목 → 탈락
+    const v1 = [a[0]-b[0], a[1]-b[1]], v2 = [c[0]-b[0], c[1]-b[1]];
+    const cosang = (v1[0]*v2[0] + v1[1]*v2[1]) /
+                   ((Math.hypot(...v1) || 1) * (Math.hypot(...v2) || 1));
+    if (Math.abs(cosang) > 0.72) return null;               // 약 44°~136° 밖 → 탈락
+  }
+
+  // 사각형 내부를 스캔라인으로 훑어 마스크와 얼마나 맞는지 + 안팎 밝기 차
+  let inside = 0, hit = 0;
+  const ys = quad.map(p => p[1]);
+  const y0 = Math.max(0, Math.floor(Math.min(...ys))), y1 = Math.min(h - 1, Math.ceil(Math.max(...ys)));
+  for (let y = y0; y <= y1; y++) {
+    let xmin = Infinity, xmax = -Infinity;
+    for (let i = 0; i < 4; i++) {
+      const a = quad[i], b = quad[(i + 1) % 4];
+      if ((a[1] <= y && b[1] > y) || (b[1] <= y && a[1] > y)) {
+        const x = a[0] + (y - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+        if (x < xmin) xmin = x;
+        if (x > xmax) xmax = x;
+      }
+    }
+    if (xmin > xmax) continue;
+    const xa = Math.max(0, Math.round(xmin)), xb = Math.min(w - 1, Math.round(xmax));
+    for (let x = xa; x <= xb; x++) {
+      const i = y * w + x;
+      inside++;
+      if (mask[i]) hit++;
+    }
+  }
+  if (!inside) return null;
+  const fill = hit / inside;                    // 사각형 안이 종이로 차 있는가
+  const cover = blobSize ? hit / blobSize : 0;  // 종이를 빠짐없이 담았는가
+
+  // 변을 사이에 둔 안쪽/바깥쪽 밝기 단차.
+  // 전체 평균으로 비교하면 글씨가 많은 페이지에서 오히려 안쪽이 어두워지므로,
+  // 경계 바로 옆만 국소적으로 견준다.
+  const cx = (quad[0][0]+quad[1][0]+quad[2][0]+quad[3][0]) / 4;
+  const cy = (quad[0][1]+quad[1][1]+quad[2][1]+quad[3][1]) / 4;
+  const off = Math.max(3, Math.round(Math.min(w, h) * 0.02));
+  let stepSum = 0, stepN = 0;
   for (let i = 0; i < 4; i++) {
     const a = quad[i], b = quad[(i + 1) % 4];
-    area += a[0] * b[1] - b[0] * a[1];
+    const steps = Math.max(6, Math.round(dist(a, b) / 6));
+    for (let k = 0; k <= steps; k++) {
+      const t = 0.15 + 0.7 * (k / steps);
+      const px = a[0] + t * (b[0]-a[0]), py = a[1] + t * (b[1]-a[1]);
+      let nx = cx - px, ny = cy - py;
+      const L = Math.hypot(nx, ny) || 1; nx /= L; ny /= L;      // 안쪽 방향
+      const ix = Math.round(px + nx * off), iy = Math.round(py + ny * off);
+      const ox = Math.round(px - nx * off), oy = Math.round(py - ny * off);
+      if (ix < 0 || iy < 0 || ix >= w || iy >= h) continue;
+      if (ox < 0 || oy < 0 || ox >= w || oy >= h) continue;
+      stepSum += gray[iy * w + ix] - gray[oy * w + ox]; stepN++;
+    }
   }
-  if (Math.abs(area) / 2 < 0.2 * n) return null;
+  const contrast = stepN ? stepSum / stepN : 0;
 
-  // 변이 너무 짧은(찌그러진) 결과 거르기
-  const edges = [dist(tl, tr), dist(tr, br), dist(br, bl), dist(bl, tl)];
-  if (Math.min(...edges) < 0.1 * Math.max(w, h)) return null;
+  // 변을 따라 실제 경계(밝기 변화)가 있는가 — 가짜 사각형을 걸러내는 핵심
+  let gs = 0, gn = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = quad[i], b = quad[(i + 1) % 4];
+    const steps = Math.max(8, Math.round(dist(a, b) / 2));
+    for (let k = 0; k <= steps; k++) {
+      const t = k / steps;
+      const x = Math.round(a[0] + t * (b[0]-a[0])), y = Math.round(a[1] + t * (b[1]-a[1]));
+      if (x < 1 || y < 1 || x >= w - 1 || y >= h - 1) { gn++; continue; }
+      let m = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++)
+        m = Math.max(m, grad[(y+dy) * w + x+dx]);
+      gs += m; gn++;
+    }
+  }
+  const edge = clamp((gs / Math.max(1, gn)) / Math.max(6, gradMean * 3.2), 0, 1);
 
-  return quad.map(p => [p[0] / s, p[1] / s]);
+  if (fill < 0.72 || cover < 0.55) return null;
+  const score = 1.35 * fill + 1.15 * cover + 0.95 * edge + 0.32 * Math.min(area / frame, 0.95);
+  return { score, fill, cover, edge, contrast, areaPct: area / frame };
+}
+
+/**
+ * 종이 영역을 자동으로 찾는다.
+ *
+ * 임계값 하나로 자르면 그림자 진 모서리가 잘려 나가거나(조명 얼룩),
+ * 책 접힘부 그림자에 페이지가 두 조각으로 갈라진다. 그래서
+ *   ① 밝기 / "종이다움"(밝고 채도 낮음) 두 채널에 대해
+ *   ② 여러 임계값으로 후보 마스크를 만들고 닫힘 연산으로 틈을 메운 뒤
+ *   ③ 볼록껍질에서 넓이 최대 사각형을 뽑고 변마다 직선을 다시 맞춰
+ *   ④ 채움·포함·경계강도로 점수를 매겨 가장 그럴듯한 것을 고른다.
+ *
+ * @returns {[number,number][]|null} [TL,TR,BR,BL] (canvas 좌표) 또는 null(=자를 필요 없음/실패)
+ */
+function detectCorners(canvas) {
+  const D = 420;
+  const s = Math.min(1, D / Math.max(canvas.width, canvas.height));
+  const w = Math.max(8, Math.round(canvas.width * s));
+  const h = Math.max(8, Math.round(canvas.height * s));
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(canvas, 0, 0, w, h);
+  const d = ctx.getImageData(0, 0, w, h).data;
+
+  const n = w * h;
+  const gray = new Uint8Array(n), paper = new Uint8Array(n);
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    const r = d[p], g = d[p+1], b = d[p+2];
+    gray[i] = (r * 299 + g * 587 + b * 114) / 1000 | 0;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    paper[i] = mx * (1 - (mx ? (mx - mn) / mx : 0));   // 밝고 색기 없는 정도
+  }
+
+  // 경계 강도(소벨) — 후보 채점에 재사용
+  const grad = new Uint8Array(n);
+  let gradSum = 0;
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    const gx = -gray[i-w-1] - 2*gray[i-1] - gray[i+w-1] + gray[i-w+1] + 2*gray[i+1] + gray[i+w+1];
+    const gy = -gray[i-w-1] - 2*gray[i-w] - gray[i-w+1] + gray[i+w-1] + 2*gray[i+w] + gray[i+w+1];
+    const m = Math.min(255, Math.hypot(gx, gy) / 4);
+    grad[i] = m; gradSum += m;
+  }
+  const gradMean = gradSum / n;
+
+  const levels = ch => {
+    const t = otsu(ch);
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) hist[ch[i]]++;
+    let acc = 0;
+    const pct = p => { let a = 0; for (let i = 0; i < 256; i++) { a += hist[i]; if (a >= n * p) return i; } return 255; };
+    acc = acc;
+    return [...new Set([t, t*0.92, t*0.84, t*0.74, t*0.62, pct(0.32), pct(0.48)]
+      .map(v => clamp(Math.round(v), 2, 253)))];
+  };
+
+  const closeR = Math.max(1, Math.round(Math.min(w, h) / 110));
+  let best = null, bestScore = -Infinity, bestRatio = 0, bestInfo = null;
+  const seen = [];
+
+  for (const ch of [gray, paper]) {
+    for (const t of levels(ch)) {
+      const mask0 = new Uint8Array(n);
+      let on = 0;
+      for (let i = 0; i < n; i++) { const v = ch[i] > t ? 1 : 0; mask0[i] = v; on += v; }
+      if (on < n * 0.03 || on > n * 0.995) continue;
+      // 거의 같은 마스크를 다시 계산하지 않는다
+      if (seen.some(v => Math.abs(v - on) < n * 0.005)) continue;
+      seen.push(on);
+
+      // 닫힘 연산: 접힘부 그림자처럼 가느다란 틈을 메워 한 덩어리로
+      const mask = closeMask(mask0, w, h, closeR);
+
+      const { lab, bestLab, bestSize } = largestBlob(mask, w, h);
+      if (!bestLab) continue;
+      const ratio = bestSize / n;
+      if (ratio < 0.04 || ratio > 0.985) continue;
+
+      const pts = borderPoints(lab, bestLab, w, h);
+      if (pts.length < 12) continue;
+      const hull = simplifyHull(convexHull(pts), 26);
+      if (hull.length < 4) continue;
+      let quad = maxAreaQuad(hull);
+      if (!quad) continue;
+      quad = orderCorners(refineQuad(orderCorners(quad), pts));
+
+      const sc = scoreQuad(quad, mask, grad, gray, w, h, bestSize, gradMean);
+      if (sc && sc.score > bestScore) {
+        bestScore = sc.score; best = quad; bestRatio = sc.areaPct; bestInfo = sc;
+      }
+    }
+  }
+
+  detectCorners.info = bestInfo;           // 디버깅/측정용
+  if (!best) return null;
+  if (bestRatio > 0.955) return null;      // 종이가 화면을 꽉 채움 → 자를 것 없음
+  // 경계도 흐릿하고 안팎 밝기 차도 없으면 종이가 아니다 (책상 무늬 등 오검출 방지)
+  if (bestInfo.edge < 0.34 && bestInfo.contrast < 5) return null;
+  return best.map(p => [clamp(p[0], 0, w) / s, clamp(p[1], 0, h) / s]);
 }
 
 /* ================================== 2) 원근 보정(사다리꼴 → 직사각형) */
