@@ -356,7 +356,9 @@ function busy(on, text = "처리 중…", pct = null) {
   $("#busyText").textContent = text;
   $("#busyBar").style.width = pct == null ? "0%" : `${Math.round(pct * 100)}%`;
 }
-const nextFrame = () => new Promise(r => requestAnimationFrame(() => r()));
+const nextFrame = () => new Promise(r => {
+  requestAnimationFrame(() => r());
+});
 
 /* ================================================================= 저장소 */
 const DB = (() => {
@@ -398,8 +400,21 @@ const DB = (() => {
   };
 })();
 
-async function persistOrder() {
-  for (let i = 0; i < state.pages.length; i++) await DB.savePage(state.pages[i], i);
+// 순서 변경을 빠르게 여러 번 눌러도 이전 저장이 뒤늦게 새 순서를 덮어쓰지 않게
+// 스냅샷을 한 줄로 세워 IndexedDB에 기록한다.
+let orderWrite = Promise.resolve();
+function persistOrder() {
+  const snapshot = state.pages.slice();
+  orderWrite = orderWrite.catch(e => {
+    console.error("페이지 순서 저장 실패:", e);
+  }).then(async () => {
+    for (let i = 0; i < snapshot.length; i++) {
+      // 대기 중 삭제된 페이지를 오래된 스냅샷이 다시 저장하지 않게 한다.
+      if (!state.pages.includes(snapshot[i])) continue;
+      await DB.savePage(snapshot[i], i);
+    }
+  });
+  return orderWrite;
 }
 
 /* ================================================== 이미지 기본 유틸 */
@@ -417,7 +432,12 @@ async function blobToCanvas(blob, maxDim) {
   return c;
 }
 function canvasToBlob(canvas, quality) {
-  return new Promise(res => canvas.toBlob(res, "image/jpeg", quality));
+  return new Promise((res, rej) => {
+    canvas.toBlob(blob => {
+      if (blob) res(blob);
+      else rej(new Error("이미지를 JPEG로 변환하지 못했습니다."));
+    }, "image/jpeg", quality);
+  });
 }
 
 /* ============================================ 1) 종이 영역 자동 감지 */
@@ -1124,10 +1144,17 @@ async function reprocess(page) {
   page.busy = true; render();
   busy(true, "다시 보정 중…");
   await nextFrame();
-  try { await renderPage(page); } catch (e) { console.error(e); }
-  page.busy = false;
-  busy(false); render();
-  await DB.savePage(page, state.pages.indexOf(page));
+  try {
+    await renderPage(page);
+    await DB.savePage(page, state.pages.indexOf(page));
+  } catch (e) {
+    console.error("다시 보정 실패:", e);
+    toast("페이지를 다시 보정하지 못했어요", 3200);
+  } finally {
+    page.busy = false;
+    busy(false);
+    render();
+  }
 }
 
 function movePage(idx, dir) {
@@ -1141,6 +1168,8 @@ function movePage(idx, dir) {
 
 async function removePage(idx) {
   const p = state.pages[idx];
+  if (!p) return;
+  if (p.busy) { toast("보정이 끝난 뒤 삭제해 주세요"); return; }
   if (!confirm(`${idx + 1}번 페이지를 삭제할까요?`)) return;
   if (p.url) URL.revokeObjectURL(p.url);
   state.pages.splice(idx, 1);
@@ -1175,6 +1204,7 @@ function render() {
     card.querySelector('[data-a="right"]').onclick = () => movePage(i, 1);
     card.querySelector('[data-a="del"]').onclick = () => removePage(i);
     card.querySelector('[data-a="edit"]').onclick = () => openEditor(i);
+    card.querySelectorAll("button").forEach(button => { button.disabled = p.busy; });
     const img = card.querySelector("img");
     if (img) img.onclick = () => openEditor(i);
     grid.appendChild(card);
@@ -1186,20 +1216,19 @@ const ed = { idx: -1, corners: null, src: null, imgUrl: null, scale: 1, filter: 
 
 async function openEditor(idx) {
   const p = state.pages[idx];
-  if (p.busy) return;
+  if (!p || p.busy) return;
   ed.idx = idx; ed.filter = p.filter; ed.rot = p.rot;
 
+  busy(true, "여는 중…");
   try {
-    busy(true, "여는 중…");
     ed.src = await blobToCanvas(p.srcBlob, SRC_MAX);
     if (ed.imgUrl) URL.revokeObjectURL(ed.imgUrl);
     ed.imgUrl = URL.createObjectURL(p.srcBlob);
 
-    // 로드 실패해도 반드시 끝나야 한다. 안 그러면 여기서 멈춰 화면이 잠긴다.
     const im = $("#cropImg");
     await new Promise((res, rej) => {
-      im.onload = res;
-      im.onerror = () => rej(new Error("미리보기를 불러오지 못했습니다"));
+      im.onload = () => res();
+      im.onerror = () => rej(new Error("편집할 사진을 불러오지 못했습니다."));
       im.src = ed.imgUrl;
     });
 
@@ -1213,15 +1242,16 @@ async function openEditor(idx) {
     $("#editor").classList.add("on");
     requestAnimationFrame(layoutCrop);
   } catch (e) {
-    console.error("편집 화면 열기 실패:", e);
-    toast("이 페이지를 열지 못했어요");
+    console.error("편집기 열기 실패:", e);
     closeEditor();
+    toast("페이지 편집기를 열지 못했어요", 3200);
   } finally {
-    busy(false);                 // 실패해도 화면이 잠기지 않게
+    busy(false);
   }
 }
 
 function layoutCrop() {
+  if (!ed.src || !$("#editor").classList.contains("on")) return;
   const im = $("#cropImg");
   const host = $("#cropHost");
   host.style.width = im.clientWidth + "px";
@@ -1284,6 +1314,14 @@ function closeEditor() {
   $("#editor").classList.remove("on");
   if (ed.imgUrl) { URL.revokeObjectURL(ed.imgUrl); ed.imgUrl = null; }
   ed.src = null;
+}
+
+function isFullCrop(corners, width, height) {
+  if (!corners || corners.length !== 4) return false;
+  const full = [[0, 0], [width, 0], [width, height], [0, height]];
+  return corners.every((corner, i) =>
+    Math.abs(corner[0] - full[i][0]) < 0.5 &&
+    Math.abs(corner[1] - full[i][1]) < 0.5);
 }
 
 /* ========================================================= PDF 만들기 */
@@ -1396,7 +1434,9 @@ async function makePdf() {
     } else groups.push(imgs);
 
     const base = (state.settings.name || "문제집").trim().replace(/[\\/:*?"<>|]/g, "_") || "문제집";
-    const date = new Date().toISOString().slice(0, 10);
+    const now = new Date();
+    const date = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, "0"),
+                  String(now.getDate()).padStart(2, "0")].join("-");
     files = groups.map((g, i) => {
       const bytes = buildPdf(g);
       const suffix = groups.length > 1 ? `_${i + 1}` : "";
@@ -1427,11 +1467,11 @@ async function deliver(files) {
 
   // 안드로이드 앱(WebView)에서는 navigator.share 가 파일 전송을 지원하지 않아
   // 네이티브 공유 시트로 넘긴다.
-  if (window.AndroidBridge && AndroidBridge.beginShare) {
+  if (window.AndroidBridge && window.AndroidBridge.beginShare) {
     try {
-      AndroidBridge.beginShare();
-      for (const f of files) AndroidBridge.addFile(f.name, await blobToBase64(f));
-      AndroidBridge.endShare();
+      window.AndroidBridge.beginShare();
+      for (const f of files) window.AndroidBridge.addFile(f.name, await blobToBase64(f));
+      window.AndroidBridge.endShare();
       toast(`공유 앱을 선택하세요 (${files.length}개, ${mb}MB)`);
       return;
     } catch (e) {
@@ -1454,7 +1494,7 @@ async function deliver(files) {
     a.href = url; a.download = f.name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
-    await new Promise(r => setTimeout(r, 350));
+    await new Promise(r => { setTimeout(r, 350); });
   }
   toast(`PDF ${files.length}개 저장됨 (${mb}MB)`);
 }
@@ -1512,22 +1552,39 @@ async function shoot() {
 async function drainShots() {
   if (draining) return;
   draining = true;
-  while (shotQueue.length) {
-    const f = shotQueue.shift();
-    const page = {
-      id: newId(), srcBlob: f, outBlob: null, url: null,
-      corners: undefined, rot: 0, filter: state.settings.filter, busy: true
-    };
-    state.pages.push(page); render();
+  try {
+    while (shotQueue.length) {
+      const f = shotQueue.shift();
+      const page = {
+        id: newId(), srcBlob: f, outBlob: null, url: null,
+        corners: undefined, rot: 0, filter: state.settings.filter, busy: true
+      };
+      state.pages.push(page); render();
+      try {
+        const srcCanvas = await blobToCanvas(page.srcBlob, SRC_MAX);
+        page.srcBlob = await canvasToBlob(srcCanvas, 0.9);
+        await renderPage(page);
+        page.busy = false;
+        render();
+        await DB.savePage(page, state.pages.indexOf(page));
+      } catch (e) {
+        console.error("촬영 사진 처리 실패:", e);
+        const at = state.pages.indexOf(page);
+        if (at >= 0) state.pages.splice(at, 1);
+        await DB.delPage(page.id);
+        render();
+        toast("방금 찍은 사진을 처리하지 못했어요", 3200);
+      }
+    }
+  } finally {
     try {
-      const srcCanvas = await blobToCanvas(page.srcBlob, SRC_MAX);
-      page.srcBlob = await canvasToBlob(srcCanvas, 0.9);
-      await renderPage(page);
-    } catch (e) { console.error(e); }
-    page.busy = false; render();
-    await DB.savePage(page, state.pages.indexOf(page));
+      await persistOrder();
+    } finally {
+      draining = false;
+      // 마지막 저장을 기다리는 사이 새 촬영이 들어왔을 수 있다.
+      if (shotQueue.length) drainShots();
+    }
   }
-  draining = false;
 }
 
 /* =============================================================== 설정 */
@@ -1576,8 +1633,7 @@ $$("#edFilter button").forEach(b => b.onclick = () => {
 });
 $("#edApply").onclick = async () => {
   const p = state.pages[ed.idx];
-  const full = ed.corners[0][0] === 0 && ed.corners[0][1] === 0 &&
-               ed.corners[2][0] === ed.src.width && ed.corners[2][1] === ed.src.height;
+  const full = isFullCrop(ed.corners, ed.src.width, ed.src.height);
   p.corners = full ? null : ed.corners.map(c => c.slice());
   p.filter = ed.filter;
   p.rot = ed.rot;
@@ -1632,18 +1688,28 @@ window.addEventListener("beforeunload", e => {
   const rows = await DB.allPages();
   if (rows && rows.length) {
     rows.sort((a, b) => a.order - b.order);
-    state.pages = rows.map(r => ({
+    const valid = rows.filter(r => r.srcBlob && r.outBlob);
+    const invalid = rows.filter(r => !r.srcBlob || !r.outBlob);
+    for (const row of invalid) await DB.delPage(row.id);
+    state.pages = valid.map(r => ({
       id: r.id, srcBlob: r.srcBlob, outBlob: r.outBlob,
       url: r.outBlob ? URL.createObjectURL(r.outBlob) : null,
       corners: r.corners, rot: r.rot || 0, filter: r.filter || "doc", busy: false
     }));
-    toast(`이전 작업 ${state.pages.length}장을 불러왔어요`);
+    if (invalid.length) {
+      toast(`이전 작업 ${state.pages.length}장 복구 · 손상된 ${invalid.length}장 제외`, 3600);
+    } else {
+      toast(`이전 작업 ${state.pages.length}장을 불러왔어요`);
+    }
   }
   render();
 })();
 
 // 테스트/자동화용
-window.__scanner = { state, buildPdf, detectCorners, warp, enhance, addFiles, makePdf, renderPage, estimateAspect, homography };
+window.__scanner = {
+  state, buildPdf, detectCorners, warp, enhance, addFiles, makePdf, renderPage,
+  estimateAspect, homography, isFullCrop
+};
 </script>
 </body>
 </html>
