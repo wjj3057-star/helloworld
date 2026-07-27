@@ -1,6 +1,6 @@
 name: APK 빌드
 
-# 안드로이드 SDK가 깔린 GitHub 러너에서 APK를 만들어 첨부한다.
+# 안드로이드 SDK가 깔린 GitHub 러너에서 APK를 만든다.
 on:
   workflow_dispatch:          # Actions 탭에서 수동 실행
   push:
@@ -9,6 +9,9 @@ on:
       - 'index.html'
       - 'android/**'
       - '.github/workflows/android.yml'
+
+permissions:
+  contents: write             # 릴리스에 APK를 올리기 위해 필요
 
 jobs:
   build:
@@ -29,10 +32,30 @@ jobs:
         working-directory: android
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: APK 첨부
+      - name: 이름 정리
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk workbook-scanner.apk
+          ls -lh workbook-scanner.apk
+
+      # 릴리스로 올린다. 아티팩트 저장 용량 제한과 무관하고,
+      # 주소가 고정이라 폰에서 바로 받기도 편하다.
+      - name: 릴리스에 APK 올리기
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view apk-latest >/dev/null 2>&1 \
+            || gh release create apk-latest \
+                 --title "문제집 스캐너 APK" \
+                 --notes "가장 최근 빌드. 아래 workbook-scanner.apk 를 받아 설치하세요."
+          gh release upload apk-latest workbook-scanner.apk --clobber
+          echo "### APK 준비 완료" >> $GITHUB_STEP_SUMMARY
+          echo "[workbook-scanner.apk 받기](https://github.com/${GITHUB_REPOSITORY}/releases/tag/apk-latest)" >> $GITHUB_STEP_SUMMARY
+
+      # 아티팩트로도 남기되, 용량이 꽉 차 있어도 빌드를 실패시키지 않는다
+      - name: APK 첨부(보조)
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: 문제집스캐너-apk
-          path: android/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
+          name: workbook-scanner-apk
+          path: workbook-scanner.apk
           retention-days: 30
