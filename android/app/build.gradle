@@ -5,6 +5,12 @@ plugins { id 'com.android.application' }
 def ksPath = System.getenv("KEYSTORE_FILE")
 def hasReleaseKey = ksPath != null && !ksPath.isEmpty() && file(ksPath).exists()
 
+// 별칭은 비밀이 아니므로 기본값을 두고, 키 비밀번호는 보통 키스토어 비밀번호와
+// 같으므로 따로 주지 않으면 그것을 쓴다. → 등록할 시크릿이 2개로 줄어든다.
+def ksPassword = System.getenv("KEYSTORE_PASSWORD")
+def ksAlias = System.getenv("KEY_ALIAS") ?: "workbook"
+def ksKeyPassword = System.getenv("KEY_PASSWORD") ?: ksPassword
+
 android {
     namespace 'com.workbook.scanner'
     compileSdk 35
@@ -21,9 +27,9 @@ android {
         release {
             if (hasReleaseKey) {
                 storeFile file(ksPath)
-                storePassword System.getenv("KEYSTORE_PASSWORD")
-                keyAlias System.getenv("KEY_ALIAS")
-                keyPassword System.getenv("KEY_PASSWORD")
+                storePassword ksPassword
+                keyAlias ksAlias
+                keyPassword ksKeyPassword
                 enableV1Signing true      // 구형 기기
                 enableV2Signing true
                 enableV3Signing true

@@ -26,14 +26,15 @@
 그러면 다음 APK가 안드로이드에게 "다른 앱"으로 보여서 **덮어쓰기 설치가 실패**합니다
 (매번 지우고 새로 깔아야 함). 고정된 키를 등록하면 그냥 업데이트됩니다.
 
-**Settings → Secrets and variables → Actions** 에서 아래 4개를 등록하세요.
+**Settings → Secrets and variables → Actions** 에서 아래 2개만 등록하면 됩니다.
 
 | 이름 | 값 |
 |---|---|
 | `KEYSTORE_BASE64` | 키스토어 파일을 base64 로 바꾼 문자열 |
 | `KEYSTORE_PASSWORD` | 키스토어 비밀번호 |
-| `KEY_ALIAS` | 키 별칭 (예: `workbook`) |
-| `KEY_PASSWORD` | 키 비밀번호 |
+
+별칭은 `workbook` 이 기본값이고, 키 비밀번호는 따로 주지 않으면 키스토어 비밀번호를
+그대로 씁니다. 다르게 쓰려면 `KEY_ALIAS` / `KEY_PASSWORD` 를 추가로 등록하세요.
 
 키를 새로 만들려면:
 
