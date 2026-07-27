@@ -1,0 +1,10 @@
+# 안드로이드 빌드 결과물
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+
+# 빌드할 때 루트 index.html 에서 자동 복사되는 사본
+android/app/src/main/assets/index.html

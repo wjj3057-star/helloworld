@@ -791,9 +791,7 @@ function detectCorners(canvas) {
     const t = otsu(ch);
     const hist = new Uint32Array(256);
     for (let i = 0; i < n; i++) hist[ch[i]]++;
-    let acc = 0;
     const pct = p => { let a = 0; for (let i = 0; i < 256; i++) { a += hist[i]; if (a >= n * p) return i; } return 255; };
-    acc = acc;
     return [...new Set([t, t*0.92, t*0.84, t*0.74, t*0.62, pct(0.32), pct(0.48)]
       .map(v => clamp(Math.round(v), 2, 253)))];
   };
@@ -1083,26 +1081,40 @@ async function addFiles(files) {
   }
   render();
 
-  for (let i = 0; i < added.length; i++) {
-    busy(true, `보정 중… ${i + 1}/${added.length}`, (i) / added.length);
-    await nextFrame();
-    const p = added[i];
-    try {
-      // 원본을 적당한 크기로 줄여 보관(용량/속도)
-      const srcCanvas = await blobToCanvas(p.srcBlob, SRC_MAX);
-      p.srcBlob = await canvasToBlob(srcCanvas, 0.9);
-      await renderPage(p);
-    } catch (e) {
-      console.error(e);
-      toast("사진 한 장을 읽지 못했어요");
+  const failed = [];
+  try {
+    for (let i = 0; i < added.length; i++) {
+      busy(true, `보정 중… ${i + 1}/${added.length}`, i / added.length);
+      await nextFrame();
+      const p = added[i];
+      try {
+        // 원본을 적당한 크기로 줄여 보관(용량/속도)
+        const srcCanvas = await blobToCanvas(p.srcBlob, SRC_MAX);
+        p.srcBlob = await canvasToBlob(srcCanvas, 0.9);
+        await renderPage(p);
+      } catch (e) {
+        // 읽지 못한 사진은 목록에 남기지 않는다.
+        // (남겨두면 PDF 만들 때 빈 페이지로 걸려 앱이 멈춘다)
+        console.error("사진 처리 실패:", p.srcBlob && p.srcBlob.name, e);
+        failed.push(list[i] ? list[i].name : "");
+        const at = state.pages.indexOf(p);
+        if (at >= 0) state.pages.splice(at, 1);
+        await DB.delPage(p.id);
+        render();
+        continue;
+      }
+      p.busy = false;
+      render();
+      await DB.savePage(p, state.pages.indexOf(p));
     }
-    p.busy = false;
-    render();
-    await DB.savePage(p, state.pages.indexOf(p));
+  } finally {
+    busy(false);
   }
-  busy(false);
   await persistOrder();
-  toast(`${added.length}장 추가됨`);
+
+  const ok = added.length - failed.length;
+  if (failed.length) toast(`${ok}장 추가됨 · ${failed.length}장은 읽지 못했어요`, 3600);
+  else toast(`${ok}장 추가됨`);
 }
 
 async function reprocess(page) {
@@ -1187,6 +1199,7 @@ async function openEditor(idx) {
     : [[0, 0], [ed.src.width, 0], [ed.src.width, ed.src.height], [0, ed.src.height]];
 
   $("#edTitle").textContent = `${idx + 1}번 페이지`;
+  showRot();
   $$("#edFilter button").forEach(b => b.classList.toggle("sel", b.dataset.f === ed.filter));
   $("#editor").classList.add("on");
   busy(false);
@@ -1204,16 +1217,24 @@ function layoutCrop() {
 
 function drawCrop() {
   const host = $("#cropHost");
-  $$(".handle", host).forEach(h => h.remove());
+  // 손잡이는 한 번만 만들고 이후에는 위치만 옮긴다
+  // (끌 때마다 DOM을 새로 만들면 느린 기기에서 끊긴다)
+  let handles = $$(".handle", host);
+  if (handles.length !== 4) {
+    handles.forEach(h => h.remove());
+    handles = [0, 1, 2, 3].map(i => {
+      const h = document.createElement("div");
+      h.className = "handle";
+      h.onpointerdown = e => startDrag(e, i);
+      host.appendChild(h);
+      return h;
+    });
+  }
   const pts = ed.corners.map(c => [c[0] * ed.scale, c[1] * ed.scale]);
   $("#cropPoly").setAttribute("points", pts.map(p => p.join(",")).join(" "));
   pts.forEach((p, i) => {
-    const h = document.createElement("div");
-    h.className = "handle";
-    h.style.left = p[0] + "px";
-    h.style.top = p[1] + "px";
-    h.onpointerdown = e => startDrag(e, i);
-    host.appendChild(h);
+    handles[i].style.left = p[0] + "px";
+    handles[i].style.top = p[1] + "px";
   });
 }
 
@@ -1233,6 +1254,15 @@ function startDrag(e, i) {
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
+}
+
+/** 적용 전에는 회전 결과가 미리보기에 안 나타나므로 버튼에 각도를 띄운다 */
+function showRot() {
+  const b = $("#edRotate");
+  b.textContent = ed.rot ? `⟳${ed.rot}°` : "⟳";
+  b.style.width = ed.rot ? "auto" : "";
+  b.style.padding = ed.rot ? "0 8px" : "";
+  b.style.color = ed.rot ? "var(--accent)" : "";
 }
 
 function closeEditor() {
@@ -1319,48 +1349,80 @@ async function makePdf() {
   if (!state.pages.length) return;
   if (state.pages.some(p => p.busy)) { toast("아직 보정 중인 페이지가 있어요"); return; }
 
-  busy(true, "PDF 만드는 중…", 0);
-  await nextFrame();
+  const ready = state.pages.filter(p => p.outBlob);
+  if (!ready.length) { toast("내보낼 페이지가 없어요"); return; }
 
-  const imgs = [];
-  for (let i = 0; i < state.pages.length; i++) {
-    const p = state.pages[i];
-    busy(true, `PDF 만드는 중… ${i + 1}/${state.pages.length}`, i / state.pages.length);
+  let files;
+  try {
+    busy(true, "PDF 만드는 중…", 0);
     await nextFrame();
-    const bytes = new Uint8Array(await p.outBlob.arrayBuffer());
-    const bmp = await createImageBitmap(p.outBlob);
-    imgs.push({ bytes, w: bmp.width, h: bmp.height });
-    if (bmp.close) bmp.close();
+
+    const imgs = [];
+    for (let i = 0; i < ready.length; i++) {
+      const p = ready[i];
+      busy(true, `PDF 만드는 중… ${i + 1}/${ready.length}`, i / ready.length);
+      await nextFrame();
+      const bytes = new Uint8Array(await p.outBlob.arrayBuffer());
+      const bmp = await createImageBitmap(p.outBlob);
+      imgs.push({ bytes, w: bmp.width, h: bmp.height });
+      if (bmp.close) bmp.close();
+    }
+
+    // 용량 제한이 있으면 여러 개로 나눔
+    const limit = (state.settings.splitMB || 0) * 1024 * 1024;
+    const groups = [];
+    if (limit > 0) {
+      let cur = [], sz = 0;
+      for (const im of imgs) {
+        if (cur.length && sz + im.bytes.length > limit) { groups.push(cur); cur = []; sz = 0; }
+        cur.push(im); sz += im.bytes.length;
+      }
+      if (cur.length) groups.push(cur);
+    } else groups.push(imgs);
+
+    const base = (state.settings.name || "문제집").trim().replace(/[\\/:*?"<>|]/g, "_") || "문제집";
+    const date = new Date().toISOString().slice(0, 10);
+    files = groups.map((g, i) => {
+      const bytes = buildPdf(g);
+      const suffix = groups.length > 1 ? `_${i + 1}` : "";
+      const name = `${base}${state.settings.withDate ? "_" + date : ""}${suffix}.pdf`;
+      return new File([bytes], name, { type: "application/pdf" });
+    });
+  } catch (e) {
+    console.error("PDF 만들기 실패:", e);
+    toast("PDF를 만들지 못했어요. 페이지를 줄여서 다시 시도해 보세요", 3600);
+    return;
+  } finally {
+    busy(false);                 // 실패해도 화면이 잠기지 않게
   }
 
-  // 용량 제한이 있으면 여러 개로 나눔
-  const limit = (state.settings.splitMB || 0) * 1024 * 1024;
-  const groups = [];
-  if (limit > 0) {
-    let cur = [], sz = 0;
-    for (const im of imgs) {
-      if (cur.length && sz + im.bytes.length > limit) { groups.push(cur); cur = []; sz = 0; }
-      cur.push(im); sz += im.bytes.length;
-    }
-    if (cur.length) groups.push(cur);
-  } else groups.push(imgs);
-
-  const base = (state.settings.name || "문제집").trim().replace(/[\\/:*?"<>|]/g, "_") || "문제집";
-  const date = new Date().toISOString().slice(0, 10);
-  const files = groups.map((g, i) => {
-    const bytes = buildPdf(g);
-    const suffix = groups.length > 1 ? `_${i + 1}` : "";
-    const name = `${base}${state.settings.withDate ? "_" + date : ""}${suffix}.pdf`;
-    return new File([bytes], name, { type: "application/pdf" });
-  });
-
-  busy(false);
   await deliver(files);
 }
+
+const blobToBase64 = blob => new Promise((res, rej) => {
+  const r = new FileReader();
+  r.onload = () => res(String(r.result).split(",")[1] || "");
+  r.onerror = () => rej(r.error);
+  r.readAsDataURL(blob);
+});
 
 async function deliver(files) {
   const total = files.reduce((s, f) => s + f.size, 0);
   const mb = (total / 1024 / 1024).toFixed(1);
+
+  // 안드로이드 앱(WebView)에서는 navigator.share 가 파일 전송을 지원하지 않아
+  // 네이티브 공유 시트로 넘긴다.
+  if (window.AndroidBridge && AndroidBridge.beginShare) {
+    try {
+      AndroidBridge.beginShare();
+      for (const f of files) AndroidBridge.addFile(f.name, await blobToBase64(f));
+      AndroidBridge.endShare();
+      toast(`공유 앱을 선택하세요 (${files.length}개, ${mb}MB)`);
+      return;
+    } catch (e) {
+      console.error("앱 공유 실패, 저장으로 대체:", e);
+    }
+  }
 
   if (navigator.canShare && navigator.canShare({ files })) {
     try {
@@ -1492,7 +1554,7 @@ $("#edAuto").onclick = () => {
   if (!c) { toast("종이를 찾지 못했어요. 직접 맞춰 주세요"); return; }
   ed.corners = c; drawCrop();
 };
-$("#edRotate").onclick = () => { ed.rot = (ed.rot + 90) % 360; toast(`회전 ${ed.rot}°`); };
+$("#edRotate").onclick = () => { ed.rot = (ed.rot + 90) % 360; showRot(); };
 $$("#edFilter button").forEach(b => b.onclick = () => {
   ed.filter = b.dataset.f;
   $$("#edFilter button").forEach(x => x.classList.toggle("sel", x === b));
@@ -1533,6 +1595,16 @@ $("#setClear").onclick = async () => {
 window.addEventListener("resize", () => {
   if ($("#editor").classList.contains("on")) layoutCrop();
 });
+
+/** 안드로이드 뒤로가기: 열려 있는 화면을 먼저 닫고, 없으면 앱을 종료시킨다 */
+window.__handleBack = () => {
+  if ($("#editor").classList.contains("on")) { closeEditor(); return true; }
+  if ($("#cam").classList.contains("on")) { closeCam(); return true; }
+  if ($("#settings").classList.contains("on")) {
+    saveSettings(); $("#settings").classList.remove("on"); return true;
+  }
+  return false;
+};
 window.addEventListener("beforeunload", e => {
   if (state.pages.length) { e.preventDefault(); e.returnValue = ""; }
 });

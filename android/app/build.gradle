@@ -1,0 +1,38 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.workbook.scanner'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.workbook.scanner"
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+    implementation 'androidx.core:core:1.13.1'
+}
+
+// 저장소 루트의 index.html 을 그대로 앱 안에 넣는다.
+// 웹과 앱이 완전히 같은 코드를 쓰도록 하기 위함(사본을 따로 관리하지 않음).
+tasks.register('copyWebApp', Copy) {
+    from rootProject.file('../index.html')
+    into layout.projectDirectory.dir('src/main/assets')
+}
+tasks.named('preBuild') { dependsOn 'copyWebApp' }
