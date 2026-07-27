@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Base64;
 import android.view.ViewGroup;
@@ -18,6 +19,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
+import android.window.OnBackInvokedDispatcher;
 
 import androidx.core.content.FileProvider;
 import androidx.webkit.WebViewAssetLoader;
@@ -100,6 +102,10 @@ public class MainActivity extends Activity {
         web.addJavascriptInterface(new Bridge(), "AndroidBridge");
         web.loadUrl(BASE + "index.html");
 
+        // Android 13+ 는 예측형 뒤로가기를 쓰며, targetSdk 35 에서는 기본으로 켜진다.
+        // 이때 onBackPressed() 는 더 이상 호출되지 않으므로 콜백을 직접 등록해야 한다.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) registerBackCallback();
+
         if (!hasCamera()) requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAMERA);
     }
 
@@ -130,12 +136,23 @@ public class MainActivity extends Activity {
         super.onActivityResult(req, result, data);
     }
 
-    /** 뒤로가기: 편집·촬영 화면이 열려 있으면 그것부터 닫는다 */
-    @Override
-    public void onBackPressed() {
+    private void registerBackCallback() {
+        getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::handleBack);
+    }
+
+    /** 뒤로가기: 편집·촬영 화면이 열려 있으면 그것부터 닫고, 없으면 앱을 끝낸다 */
+    private void handleBack() {
         web.evaluateJavascript(
                 "(window.__handleBack && window.__handleBack()) ? '1' : '0'",
                 value -> { if (value == null || !value.contains("1")) finish(); });
+    }
+
+    /** Android 12 이하 경로 */
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        handleBack();
     }
 
     /** 웹 쪽에서 만든 PDF를 안드로이드 공유 시트로 넘긴다 */
