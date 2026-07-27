@@ -40,6 +40,7 @@ public class MainActivity extends Activity {
     private static final String BASE = "https://appassets.androidplatform.net/assets/";
     private static final int REQ_FILE = 1001;
     private static final int REQ_CAMERA = 1002;
+    private static final String[] CAMERA_ONLY = { PermissionRequest.RESOURCE_VIDEO_CAPTURE };
 
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
@@ -75,8 +76,16 @@ public class MainActivity extends Activity {
             @Override
             public void onPermissionRequest(final PermissionRequest req) {
                 runOnUiThread(() -> {
+                    // 페이지가 요청한 것을 통째로 승인하지 않는다.
+                    // 이 앱에 필요한 건 카메라뿐이고, 마이크 등은 줄 이유가 없다.
+                    boolean wantsCamera = false;
+                    for (String r : req.getResources()) {
+                        if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r)) wantsCamera = true;
+                    }
+                    if (!wantsCamera) { req.deny(); return; }
+
                     if (hasCamera()) {
-                        req.grant(req.getResources());
+                        req.grant(CAMERA_ONLY);
                     } else {
                         pendingCamera = req;             // OS 권한부터 받고 다시 시도
                         requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAMERA);
@@ -118,7 +127,7 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(code, perms, results);
         if (code != REQ_CAMERA || pendingCamera == null) return;
         boolean ok = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
-        if (ok) pendingCamera.grant(pendingCamera.getResources());
+        if (ok) pendingCamera.grant(CAMERA_ONLY);
         else pendingCamera.deny();
         pendingCamera = null;
     }

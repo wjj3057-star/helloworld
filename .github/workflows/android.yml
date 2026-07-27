@@ -57,13 +57,17 @@ jobs:
 
       - name: 서명 확인
         run: |
+          # 기본 셸은 bash -e 라 pipefail 이 없다. 그대로 두면 apksigner 가
+          # 실패해도 tee 의 종료코드(0)에 가려져 검증이 통과해 버린다.
+          set -o pipefail
           cp android/app/build/outputs/apk/release/app-release.apk workbook-scanner.apk
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
           echo "### 서명 정보" >> "$GITHUB_STEP_SUMMARY"
           "$APKSIGNER" verify --print-certs --verbose workbook-scanner.apk | tee signing.txt
           {
             echo '```'
-            grep -E "Verified using|Signer #1 certificate (DN|SHA-256)" signing.txt
+            grep -E "Verified using|Signer #1 certificate (DN|SHA-256)" signing.txt \
+              || echo "(apksigner 출력 형식이 달라 요약을 생략합니다)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           ls -lh workbook-scanner.apk
@@ -116,7 +120,10 @@ jobs:
 
       # 릴리스로 올린다. 아티팩트 저장 용량 제한과 무관하고,
       # 주소가 고정이라 폰에서 바로 받기도 편하다.
+      # 기본 브랜치에서만 공개 릴리스를 갱신한다.
+      # 아니면 실험용 브랜치를 밀 때마다 사용자가 받는 APK 가 바뀐다.
       - name: 릴리스에 APK 올리기
+        if: github.ref_name == github.event.repository.default_branch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

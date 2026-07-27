@@ -398,8 +398,15 @@ const DB = (() => {
   };
 })();
 
-async function persistOrder() {
-  for (let i = 0; i < state.pages.length; i++) await DB.savePage(state.pages[i], i);
+// 순서 저장은 한 번에 하나씩만 돌린다. 연타로 여러 개가 겹쳐 돌면
+// 실행 중에 바뀌는 배열을 읽게 되므로, 시작 시점의 목록을 복사해 쓴다.
+let orderChain = Promise.resolve();
+function persistOrder() {
+  orderChain = orderChain.then(async () => {
+    const snapshot = state.pages.slice();
+    for (let i = 0; i < snapshot.length; i++) await DB.savePage(snapshot[i], i);
+  }).catch(e => console.error("순서 저장 실패:", e));
+  return orderChain;
 }
 
 /* ================================================== 이미지 기본 유틸 */
@@ -1396,7 +1403,10 @@ async function makePdf() {
     } else groups.push(imgs);
 
     const base = (state.settings.name || "문제집").trim().replace(/[\\/:*?"<>|]/g, "_") || "문제집";
-    const date = new Date().toISOString().slice(0, 10);
+    // toISOString() 은 UTC 라 한국(UTC+9)에서는 자정~오전 9시 사이에
+    // 어제 날짜가 찍힌다. 사용자의 현지 날짜를 쓴다.
+    const d = new Date();
+    const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     files = groups.map((g, i) => {
       const bytes = buildPdf(g);
       const suffix = groups.length > 1 ? `_${i + 1}` : "";
@@ -1523,7 +1533,16 @@ async function drainShots() {
       const srcCanvas = await blobToCanvas(page.srcBlob, SRC_MAX);
       page.srcBlob = await canvasToBlob(srcCanvas, 0.9);
       await renderPage(page);
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      // 처리하지 못한 사진은 목록에 남기지 않는다. 남겨두면 "보정 중…" 상태로
+      // 계속 보이고, 저장까지 되어 다시 켰을 때 되살아난다.
+      console.error("촬영 사진 처리 실패:", e);
+      const at = state.pages.indexOf(page);
+      if (at >= 0) state.pages.splice(at, 1);
+      render();
+      toast("사진 한 장을 처리하지 못했어요");
+      continue;
+    }
     page.busy = false; render();
     await DB.savePage(page, state.pages.indexOf(page));
   }
@@ -1576,8 +1595,11 @@ $$("#edFilter button").forEach(b => b.onclick = () => {
 });
 $("#edApply").onclick = async () => {
   const p = state.pages[ed.idx];
-  const full = ed.corners[0][0] === 0 && ed.corners[0][1] === 0 &&
-               ed.corners[2][0] === ed.src.width && ed.corners[2][1] === ed.src.height;
+  // 네 모서리를 모두 본다. 예전엔 좌상단·우하단만 비교해서, 우상단이나
+  // 좌하단만 옮긴 편집이 "전체 사용"으로 잘못 판정되어 버려졌다.
+  const box = [[0, 0], [ed.src.width, 0], [ed.src.width, ed.src.height], [0, ed.src.height]];
+  const full = ed.corners.every((c, i) =>
+    Math.abs(c[0] - box[i][0]) < 0.5 && Math.abs(c[1] - box[i][1]) < 0.5);
   p.corners = full ? null : ed.corners.map(c => c.slice());
   p.filter = ed.filter;
   p.rot = ed.rot;
