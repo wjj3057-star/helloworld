@@ -76,11 +76,26 @@ jobs:
 
           echo "===== 패키지 정보 ====="
           "$AAPT" dump badging workbook-scanner.apk 2>/dev/null \
-            | grep -E "^package|^application-label|^launchable-activity|^uses-permission|sdkVersion" || true
+            | grep -E "^package|^application:|^launchable-activity|^uses-permission|sdkVersion" || true
 
           echo
-          echo "===== 아이콘 리소스 ====="
-          unzip -l workbook-scanner.apk | grep -E "ic_launcher" || echo "  (없음!)"
+          echo "===== 런처 아이콘 ====="
+          # 릴리스 빌드는 리소스 경로를 짧게 바꾸므로(res/mipmap-.../ic_launcher.xml → res/xx.xml)
+          # 파일 이름으로 찾으면 안 된다. 매니페스트가 실제로 가리키는 경로를 따라간다.
+          ICON=$("$AAPT" dump badging workbook-scanner.apk 2>/dev/null \
+                 | sed -n "s/^application: .*icon='\([^']*\)'.*/\1/p" | head -1)
+          if [ -z "$ICON" ]; then echo "  ❌ 매니페스트에 아이콘이 없다"; exit 1; fi
+          echo "  매니페스트가 가리키는 경로: $ICON"
+          if unzip -l workbook-scanner.apk | grep -q "$ICON"; then
+            echo "  ✅ APK 안에 존재"
+          else
+            echo "  ❌ 가리키는 파일이 APK에 없다"; exit 1
+          fi
+          # 적응형 아이콘 3개 레이어(배경/전경/단색)가 다 들어갔는지
+          LAYERS=$("$AAPT" dump xmltree workbook-scanner.apk --file "$ICON" 2>/dev/null \
+                   | grep -cE "E: (background|foreground|monochrome)" || true)
+          echo "  적응형 아이콘 레이어: ${LAYERS}개 (배경/전경/단색)"
+          [ "$LAYERS" -ge 3 ] || { echo "  ❌ 레이어가 부족하다"; exit 1; }
 
           echo
           echo "===== 웹앱이 저장소 index.html 과 동일한지 ====="
