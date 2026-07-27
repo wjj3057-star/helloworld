@@ -1,5 +1,10 @@
 plugins { id 'com.android.application' }
 
+// 서명 키는 저장소에 두지 않는다. 빌드할 때 환경변수(=GitHub Secrets)로 받는다.
+// 키가 없으면 디버그 키로 서명해 빌드 자체는 계속되게 한다.
+def ksPath = System.getenv("KEYSTORE_FILE")
+def hasReleaseKey = ksPath != null && !ksPath.isEmpty() && file(ksPath).exists()
+
 android {
     namespace 'com.workbook.scanner'
     compileSdk 35
@@ -12,10 +17,25 @@ android {
         versionName "1.0"
     }
 
+    signingConfigs {
+        release {
+            if (hasReleaseKey) {
+                storeFile file(ksPath)
+                storePassword System.getenv("KEYSTORE_PASSWORD")
+                keyAlias System.getenv("KEY_ALIAS")
+                keyPassword System.getenv("KEY_PASSWORD")
+                enableV1Signing true      // 구형 기기
+                enableV2Signing true
+                enableV3Signing true
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig hasReleaseKey ? signingConfigs.release : signingConfigs.debug
         }
     }
     compileOptions {

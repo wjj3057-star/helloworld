@@ -28,13 +28,44 @@ jobs:
       - name: Gradle 준비(캐시 포함)
         uses: gradle/actions/setup-gradle@v4
 
+      # 서명 키는 저장소에 두지 않고 Secrets 에서 꺼내 쓴다.
+      # 키가 등록돼 있지 않으면 디버그 키로 서명해 빌드는 계속된다.
+      - name: 서명 키 준비
+        id: ks
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "path=$RUNNER_TEMP/release.jks" >> "$GITHUB_OUTPUT"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "정식 서명 키로 서명합니다."
+          else
+            echo "path=" >> "$GITHUB_OUTPUT"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::KEYSTORE_BASE64 시크릿이 없어 디버그 키로 서명합니다. 빌드마다 키가 바뀌어 앱 업데이트 설치가 실패할 수 있습니다."
+          fi
+
       - name: APK 빌드
         working-directory: android
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        env:
+          KEYSTORE_FILE: ${{ steps.ks.outputs.path }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: 이름 정리
+      - name: 서명 확인
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk workbook-scanner.apk
+          cp android/app/build/outputs/apk/release/app-release.apk workbook-scanner.apk
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          echo "### 서명 정보" >> "$GITHUB_STEP_SUMMARY"
+          "$APKSIGNER" verify --print-certs --verbose workbook-scanner.apk | tee signing.txt
+          {
+            echo '```'
+            grep -E "Verified using|Signer #1 certificate (DN|SHA-256)" signing.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           ls -lh workbook-scanner.apk
 
       # 릴리스로 올린다. 아티팩트 저장 용량 제한과 무관하고,
@@ -48,8 +79,8 @@ jobs:
                  --title "문제집 스캐너 APK" \
                  --notes "가장 최근 빌드. 아래 workbook-scanner.apk 를 받아 설치하세요."
           gh release upload apk-latest workbook-scanner.apk --clobber
-          echo "### APK 준비 완료" >> $GITHUB_STEP_SUMMARY
-          echo "[workbook-scanner.apk 받기](https://github.com/${GITHUB_REPOSITORY}/releases/tag/apk-latest)" >> $GITHUB_STEP_SUMMARY
+          echo "### APK 준비 완료 (서명: ${{ steps.ks.outputs.signed == 'true' && '정식 키' || '디버그 키' }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "[workbook-scanner.apk 받기](https://github.com/${GITHUB_REPOSITORY}/releases/tag/apk-latest)" >> "$GITHUB_STEP_SUMMARY"
 
       # 아티팩트로도 남기되, 용량이 꽉 차 있어도 빌드를 실패시키지 않는다
       - name: APK 첨부(보조)

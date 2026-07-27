@@ -1,17 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 문서 한 장 + 접힌 모서리 -->
+<!--
+  살짝 기울어진 문제집 한 장 + 빨간 채점 표시.
+  기울여 놓은 건 이 앱이 하는 일(비뚤게 찍어도 반듯하게 펴 줌)을 나타낸다.
+  중요한 내용은 적응형 아이콘 안전영역(가운데 72dp) 안에 둔다.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M36,28 L62,28 L74,40 L74,80 L36,80 Z" />
-    <path
-        android:fillColor="#93A1B1"
-        android:pathData="M62,28 L74,40 L62,40 Z" />
-    <path
-        android:fillColor="#4C8DFF"
-        android:pathData="M43,50 L67,50 L67,54 L43,54 Z
-                          M43,59 L67,59 L67,63 L43,63 Z
-                          M43,68 L58,68 L58,72 L43,72 Z" />
+
+    <group android:rotation="-9" android:pivotX="54" android:pivotY="54">
+
+        <!-- 종이 그림자 -->
+        <path android:fillColor="#33000000"
+              android:pathData="M37,30 L75,30 L75,82 L37,82 Z" />
+
+        <!-- 종이 -->
+        <path android:fillColor="#FFFFFFFF"
+              android:pathData="M35,28 L64,28 L73,37 L73,80 L35,80 Z" />
+
+        <!-- 접힌 모서리 -->
+        <path android:fillColor="#FFB9CDF2"
+              android:pathData="M64,28 L73,37 L64,37 Z" />
+
+        <!-- 본문 글줄 -->
+        <path android:fillColor="#FF2B4A7E"
+              android:pathData="M41,45 L61,45 L61,48 L41,48 Z
+                                M41,52 L66,52 L66,55 L41,55 Z
+                                M41,59 L58,59 L58,62 L41,62 Z
+                                M41,66 L63,66 L63,69 L41,69 Z" />
+
+        <!-- 빨간 채점 동그라미 -->
+        <path android:strokeColor="#FFE23B3B" android:strokeWidth="2.6"
+              android:fillColor="#00000000"
+              android:pathData="M64,71 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0" />
+    </group>
 </vector>
