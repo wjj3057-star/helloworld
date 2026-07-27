@@ -20,6 +20,35 @@
 `index.html` 이나 `android/` 를 고쳐 푸시하면 APK가 자동으로 다시 빌드되어
 같은 자리에 갱신됩니다. 직접 다시 굽고 싶으면 **Actions → APK 빌드 → Run workflow**.
 
+### 서명 키 등록 (한 번만)
+
+키를 등록하지 않아도 APK는 만들어지지만, **디버그 키는 빌드할 때마다 새로 생성**됩니다.
+그러면 다음 APK가 안드로이드에게 "다른 앱"으로 보여서 **덮어쓰기 설치가 실패**합니다
+(매번 지우고 새로 깔아야 함). 고정된 키를 등록하면 그냥 업데이트됩니다.
+
+**Settings → Secrets and variables → Actions** 에서 아래 4개를 등록하세요.
+
+| 이름 | 값 |
+|---|---|
+| `KEYSTORE_BASE64` | 키스토어 파일을 base64 로 바꾼 문자열 |
+| `KEYSTORE_PASSWORD` | 키스토어 비밀번호 |
+| `KEY_ALIAS` | 키 별칭 (예: `workbook`) |
+| `KEY_PASSWORD` | 키 비밀번호 |
+
+키를 새로 만들려면:
+
+```bash
+keytool -genkeypair -v -keystore release.jks -alias workbook \
+  -keyalg RSA -keysize 4096 -validity 10950
+base64 -w0 release.jks     # 이 출력을 KEYSTORE_BASE64 에 넣는다
+```
+
+등록 후 다시 빌드하면 실행 요약에 `서명: 정식 키` 와 인증서 지문이 표시됩니다.
+
+> `release.jks` 는 이 앱의 신분증입니다. 잃어버리면 기존 설치본을 덮어쓰는 업데이트를
+> 만들 수 없습니다. 안전한 곳에 보관하고 **저장소에는 절대 올리지 마세요**
+> (`.gitignore` 로 `*.jks` 를 막아두었습니다).
+
 앱은 `index.html` 을 그대로 담은 얇은 껍데기입니다. 웹과 완전히 같은 코드가 돌아가며,
 빌드할 때 루트의 `index.html` 이 자동으로 복사되므로 사본을 따로 관리하지 않습니다.
 
