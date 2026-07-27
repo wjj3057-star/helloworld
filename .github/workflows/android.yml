@@ -13,6 +13,11 @@ on:
 permissions:
   contents: write             # 릴리스에 APK를 올리기 위해 필요
 
+# 같은 브랜치에 수정이 연달아 올라오면 오래된 빌드는 취소한다.
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -86,7 +91,9 @@ jobs:
                  | sed -n "s/^application: .*icon='\([^']*\)'.*/\1/p" | head -1)
           if [ -z "$ICON" ]; then echo "  ❌ 매니페스트에 아이콘이 없다"; exit 1; fi
           echo "  매니페스트가 가리키는 경로: $ICON"
-          if unzip -l workbook-scanner.apk | grep -q "$ICON"; then
+          # GitHub Actions의 bash는 pipefail이 켜져 있다. grep -q를 쓰면 일찍
+          # 종료된 grep 때문에 unzip이 SIGPIPE(141)로 실패할 수 있어 끝까지 읽는다.
+          if unzip -Z1 workbook-scanner.apk | grep -Fx -- "$ICON" >/dev/null; then
             echo "  ✅ APK 안에 존재"
           else
             echo "  ❌ 가리키는 파일이 APK에 없다"; exit 1
@@ -108,7 +115,8 @@ jobs:
 
           echo
           echo "===== 인터넷 권한이 없는지 ====="
-          if "$AAPT" dump badging workbook-scanner.apk 2>/dev/null | grep -q "android.permission.INTERNET"; then
+          if "$AAPT" dump badging workbook-scanner.apk 2>/dev/null \
+               | grep -F "android.permission.INTERNET" >/dev/null; then
             echo "  ❌ INTERNET 권한이 들어있다"; exit 1
           else
             echo "  ✅ INTERNET 권한 없음 (사진이 나갈 통로 자체가 없음)"
@@ -117,6 +125,8 @@ jobs:
       # 릴리스로 올린다. 아티팩트 저장 용량 제한과 무관하고,
       # 주소가 고정이라 폰에서 바로 받기도 편하다.
       - name: 릴리스에 APK 올리기
+        # 기능 브랜치의 APK가 사용자가 받는 apk-latest를 덮어쓰면 안 된다.
+        if: github.ref_name == github.event.repository.default_branch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
