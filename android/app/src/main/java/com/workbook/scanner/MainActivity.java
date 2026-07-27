@@ -75,12 +75,23 @@ public class MainActivity extends Activity {
             @Override
             public void onPermissionRequest(final PermissionRequest req) {
                 runOnUiThread(() -> {
+                    if (!isTrustedCameraRequest(req)) {
+                        req.deny();
+                        return;
+                    }
                     if (hasCamera()) {
-                        req.grant(req.getResources());
+                        grantCamera(req);
                     } else {
                         pendingCamera = req;             // OS 권한부터 받고 다시 시도
                         requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAMERA);
                     }
+                });
+            }
+
+            @Override
+            public void onPermissionRequestCanceled(final PermissionRequest req) {
+                runOnUiThread(() -> {
+                    if (pendingCamera == req) pendingCamera = null;
                 });
             }
 
@@ -113,12 +124,29 @@ public class MainActivity extends Activity {
         return checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
     }
 
+    private boolean isTrustedCameraRequest(PermissionRequest req) {
+        Uri origin = req.getOrigin();
+        if (origin == null
+                || !"https".equals(origin.getScheme())
+                || !"appassets.androidplatform.net".equals(origin.getHost())) {
+            return false;
+        }
+        for (String resource : req.getResources()) {
+            if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(resource)) return true;
+        }
+        return false;
+    }
+
+    private void grantCamera(PermissionRequest req) {
+        req.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
+    }
+
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
         super.onRequestPermissionsResult(code, perms, results);
         if (code != REQ_CAMERA || pendingCamera == null) return;
         boolean ok = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
-        if (ok) pendingCamera.grant(pendingCamera.getResources());
+        if (ok && isTrustedCameraRequest(pendingCamera)) grantCamera(pendingCamera);
         else pendingCamera.deny();
         pendingCamera = null;
     }
