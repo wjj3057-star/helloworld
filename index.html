@@ -410,6 +410,22 @@ function persistOrder() {
 }
 
 /* ================================================== 이미지 기본 유틸 */
+// 아래 이미지 처리 함수들은 메인 스레드와 워커 양쪽에서 그대로 돌아야 한다.
+// 워커에는 document 가 없으므로 캔버스는 반드시 이 헬퍼로만 만든다.
+function mkCanvas(w, h) {
+  if (typeof document !== "undefined") {
+    const c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    return c;
+  }
+  return new OffscreenCanvas(w, h);
+}
+
+function canvasToBlob(canvas, quality) {
+  if (canvas.convertToBlob) return canvas.convertToBlob({ type: "image/jpeg", quality });
+  return new Promise(res => canvas.toBlob(res, "image/jpeg", quality));
+}
+
 async function blobToCanvas(blob, maxDim) {
   let bmp;
   try { bmp = await createImageBitmap(blob, { imageOrientation: "from-image" }); }
@@ -417,14 +433,10 @@ async function blobToCanvas(blob, maxDim) {
   const s = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
   const w = Math.max(1, Math.round(bmp.width * s));
   const h = Math.max(1, Math.round(bmp.height * s));
-  const c = document.createElement("canvas");
-  c.width = w; c.height = h;
+  const c = mkCanvas(w, h);
   c.getContext("2d").drawImage(bmp, 0, 0, w, h);
   if (bmp.close) bmp.close();
   return c;
-}
-function canvasToBlob(canvas, quality) {
-  return new Promise(res => canvas.toBlob(res, "image/jpeg", quality));
 }
 
 /* ============================================ 1) 종이 영역 자동 감지 */
@@ -767,8 +779,7 @@ function detectCorners(canvas) {
   const s = Math.min(1, D / Math.max(canvas.width, canvas.height));
   const w = Math.max(8, Math.round(canvas.width * s));
   const h = Math.max(8, Math.round(canvas.height * s));
-  const c = document.createElement("canvas");
-  c.width = w; c.height = h;
+  const c = mkCanvas(w, h);
   const ctx = c.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(canvas, 0, 0, w, h);
   const d = ctx.getImageData(0, 0, w, h).data;
@@ -1013,58 +1024,146 @@ function enhance(img, mode) {
   const bg = boxMean(gray, w, h, r);
   const gamma = mode === "bw" ? 2.6 : 1.45;
 
+  // 픽셀마다 Math.pow 를 3번씩 부르면 1000만 번이 넘어 이 단계가 제일 느려진다.
+  // 밝기비(0~1)를 1024단계로 나눈 표를 미리 만들어 찾아 쓴다.
+  const LUT_N = 1024, lut = new Uint8Array(LUT_N + 1);
+  for (let i = 0; i <= LUT_N; i++) lut[i] = Math.pow(i / LUT_N, gamma) * 255 + 0.5;
+
   for (let i = 0, p = 0; i < n; i++, p += 4) {
-    const base = Math.max(24, bg[i]);
+    const inv = LUT_N / Math.max(24, bg[i]);
     if (mode === "bw") {
-      const t = Math.pow(clamp(gray[i] / base, 0, 1), gamma) * 255;
+      const t = lut[Math.min(LUT_N, gray[i] * inv | 0)];
       d[p] = d[p + 1] = d[p + 2] = t;
     } else {
-      for (let ch = 0; ch < 3; ch++)
-        d[p + ch] = Math.pow(clamp(d[p + ch] / base, 0, 1), gamma) * 255;
+      d[p]     = lut[Math.min(LUT_N, d[p]     * inv | 0)];
+      d[p + 1] = lut[Math.min(LUT_N, d[p + 1] * inv | 0)];
+      d[p + 2] = lut[Math.min(LUT_N, d[p + 2] * inv | 0)];
     }
   }
   return img;
 }
 
 /* ========================================== 4) 한 장 처리 파이프라인 */
-async function renderPage(page) {
-  const src = await blobToCanvas(page.srcBlob, SRC_MAX);
+/**
+ * 사진 한 장을 끝까지 처리한다. 메인 스레드와 워커 양쪽에서 그대로 돌아간다.
+ * 예전에는 호출부가 "원본 축소 → 재인코딩" 을 하고 여기서 또 디코드해서
+ * 같은 사진을 두 번 디코드했다. 한 번만 하도록 합쳤다.
+ */
+async function processImage(blob, o) {
+  const src = await blobToCanvas(blob, o.srcMax);
+  const srcBlob = o.makeSrc ? await canvasToBlob(src, 0.9) : null;
 
-  if (page.corners === undefined) page.corners = detectCorners(src);
+  let corners = o.corners;
+  if (corners === undefined) corners = detectCorners(src);
 
-  let img;
-  if (page.corners) {
-    img = warp(src, page.corners, OUT_MAX);
-  }
+  let img = corners ? warp(src, corners, o.outMax) : null;
   if (!img) {
-    const s = Math.min(1, OUT_MAX / Math.max(src.width, src.height));
+    const s = Math.min(1, o.outMax / Math.max(src.width, src.height));
     const w = Math.max(1, Math.round(src.width * s)), h = Math.max(1, Math.round(src.height * s));
-    const c = document.createElement("canvas");
-    c.width = w; c.height = h;
+    const c = mkCanvas(w, h);
     c.getContext("2d").drawImage(src, 0, 0, w, h);
     img = c.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, w, h);
   }
 
-  enhance(img, page.filter);
+  enhance(img, o.filter);
 
-  const flat = document.createElement("canvas");
-  flat.width = img.width; flat.height = img.height;
+  const flat = mkCanvas(img.width, img.height);
   flat.getContext("2d").putImageData(img, 0, 0);
 
-  const rot = ((page.rot % 360) + 360) % 360;
+  const rot = ((o.rot % 360) + 360) % 360;
   let final = flat;
   if (rot) {
     const swap = rot === 90 || rot === 270;
-    final = document.createElement("canvas");
-    final.width = swap ? flat.height : flat.width;
-    final.height = swap ? flat.width : flat.height;
+    final = mkCanvas(swap ? flat.height : flat.width, swap ? flat.width : flat.height);
     const ctx = final.getContext("2d");
     ctx.translate(final.width / 2, final.height / 2);
     ctx.rotate(rot * Math.PI / 180);
     ctx.drawImage(flat, -flat.width / 2, -flat.height / 2);
   }
 
-  page.outBlob = await canvasToBlob(final, state.settings.quality);
+  return { srcBlob, outBlob: await canvasToBlob(final, o.quality), corners: corners || null };
+}
+
+/* ---- 워커: 무거운 처리를 화면 밖으로 -------------------------------
+   보정 한 장에 메인 스레드를 0.5~1초 붙잡기 때문에, 그대로 두면
+   연속 촬영 중 카메라 미리보기와 셔터가 그동안 멎는다.
+   위 함수들을 그대로 문자열로 만들어 워커에 실어 보낸다(정의는 한 곳뿐). */
+const PROC_FNS = [
+  clamp, dist, cross3, mkCanvas, canvasToBlob, blobToCanvas,
+  otsu, maskIntegral, closeMask, largestBlob, borderPoints, convexHull, simplifyHull,
+  maxAreaQuad, fitLine, lineFrom, lineCross, refineQuad, orderCorners, polyArea,
+  scoreQuad, detectCorners, solve, homography, estimateAspect, warp, boxMean, enhance,
+  processImage
+];
+
+function workerSource() {
+  const defs = PROC_FNS.map(f => {
+    const src = f.toString();
+    return src.startsWith("function") ? src : `const ${f.name} = ${src};`;
+  }).join("\n");
+  return defs + `
+self.onmessage = async (e) => {
+  const { id, blob, opts } = e.data;
+  try {
+    const r = await processImage(blob, opts);
+    self.postMessage({ id, ok: true, r });
+  } catch (err) {
+    self.postMessage({ id, ok: false, error: String((err && err.message) || err) });
+  }
+};`;
+}
+
+let procWorker, workerSeq = 0, workerDead = false;
+const workerJobs = new Map();
+
+function getWorker() {
+  if (procWorker || workerDead) return procWorker;
+  try {
+    if (typeof Worker === "undefined" || typeof OffscreenCanvas === "undefined") throw 0;
+    const url = URL.createObjectURL(new Blob([workerSource()], { type: "text/javascript" }));
+    procWorker = new Worker(url);
+    URL.revokeObjectURL(url);
+    procWorker.onmessage = e => {
+      const job = workerJobs.get(e.data.id);
+      if (!job) return;
+      workerJobs.delete(e.data.id);
+      e.data.ok ? job.res(e.data.r) : job.rej(new Error(e.data.error));
+    };
+    procWorker.onerror = () => {                 // 워커를 못 쓰면 메인에서 처리
+      workerDead = true;
+      procWorker = null;
+      workerJobs.forEach(j => j.rej(new Error("워커 오류")));
+      workerJobs.clear();
+    };
+  } catch (e) {
+    workerDead = true; procWorker = null;
+  }
+  return procWorker;
+}
+
+function runProcess(blob, opts) {
+  const w = getWorker();
+  if (!w) return processImage(blob, opts);       // 폴백: 메인 스레드
+  return new Promise((res, rej) => {
+    const id = ++workerSeq;
+    workerJobs.set(id, { res, rej });
+    w.postMessage({ id, blob, opts });
+  }).catch(err => {
+    console.warn("워커 처리 실패, 메인 스레드로 대체:", err);
+    return processImage(blob, opts);
+  });
+}
+
+/** @param {boolean} first 처음 넣는 사진이면 축소한 원본도 함께 받아 보관한다 */
+async function renderPage(page, first) {
+  const r = await runProcess(page.srcBlob, {
+    corners: page.corners, filter: page.filter, rot: page.rot,
+    srcMax: SRC_MAX, outMax: OUT_MAX, quality: state.settings.quality,
+    makeSrc: !!first
+  });
+  if (r.srcBlob) page.srcBlob = r.srcBlob;
+  if (page.corners === undefined) page.corners = r.corners;
+  page.outBlob = r.outBlob;
   if (page.url) URL.revokeObjectURL(page.url);
   page.url = URL.createObjectURL(page.outBlob);
   return page;
@@ -1098,10 +1197,7 @@ async function addFiles(files) {
       await nextFrame();
       const p = added[i];
       try {
-        // 원본을 적당한 크기로 줄여 보관(용량/속도)
-        const srcCanvas = await blobToCanvas(p.srcBlob, SRC_MAX);
-        p.srcBlob = await canvasToBlob(srcCanvas, 0.9);
-        await renderPage(p);
+        await renderPage(p, true);      // 축소한 원본 보관까지 한 번에
       } catch (e) {
         // 읽지 못한 사진은 목록에 남기지 않는다.
         // (남겨두면 PDF 만들 때 빈 페이지로 걸려 앱이 멈춘다)
@@ -1530,9 +1626,7 @@ async function drainShots() {
     };
     state.pages.push(page); render();
     try {
-      const srcCanvas = await blobToCanvas(page.srcBlob, SRC_MAX);
-      page.srcBlob = await canvasToBlob(srcCanvas, 0.9);
-      await renderPage(page);
+      await renderPage(page, true);     // 축소한 원본 보관까지 한 번에
     } catch (e) {
       // 처리하지 못한 사진은 목록에 남기지 않는다. 남겨두면 "보정 중…" 상태로
       // 계속 보이고, 저장까지 되어 다시 켰을 때 되살아난다.
