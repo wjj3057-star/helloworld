@@ -961,23 +961,31 @@ function warp(srcCanvas, corners, maxOut) {
   const out = new ImageData(W, H);
   const od = out.data;
 
+  const maxU = sw - 1, maxV = sh - 1, rowBytes = sw * 4;
+  let o = 0;
   for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const den = a6 * x + a7 * y + 1;
-      const u = (a0 * x + a1 * y + a2) / den;
-      const v = (a3 * x + a4 * y + a5) / den;
-      const o = (y * W + x) * 4;
-      if (u < 0 || v < 0 || u > sw - 1 || v > sh - 1) { od[o] = od[o+1] = od[o+2] = 255; od[o+3] = 255; continue; }
+    // 행 안에서는 y 항이 고정이므로 밖으로 뺀다
+    const nu = a1 * y + a2, nv = a4 * y + a5, nd = a7 * y + 1;
+    for (let x = 0; x < W; x++, o += 4) {
+      const den = a6 * x + nd;
+      const u = (a0 * x + nu) / den;
+      const v = (a3 * x + nv) / den;
+      if (u < 0 || v < 0 || u > maxU || v > maxV) {
+        od[o] = od[o+1] = od[o+2] = od[o+3] = 255;
+        continue;
+      }
       const x0 = u | 0, y0 = v | 0;
-      const x1 = x0 + 1 > sw - 1 ? x0 : x0 + 1;
-      const y1 = y0 + 1 > sh - 1 ? y0 : y0 + 1;
       const fx = u - x0, fy = v - y0;
-      const i00 = (y0 * sw + x0) * 4, i10 = (y0 * sw + x1) * 4;
-      const i01 = (y1 * sw + x0) * 4, i11 = (y1 * sw + x1) * 4;
-      const w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy);
-      const w01 = (1 - fx) * fy,       w11 = fx * fy;
-      for (let ch = 0; ch < 3; ch++)
-        od[o + ch] = sd[i00 + ch] * w00 + sd[i10 + ch] * w10 + sd[i01 + ch] * w01 + sd[i11 + ch] * w11;
+      // 이웃 화소는 곱셈 대신 덧셈으로 짚는다
+      const i00 = (y0 * sw + x0) * 4;
+      const i10 = x0 < maxU ? i00 + 4 : i00;
+      const i01 = y0 < maxV ? i00 + rowBytes : i00;
+      const i11 = x0 < maxU ? i01 + 4 : i01;
+      const gx = 1 - fx, gy = 1 - fy;
+      const w00 = gx * gy, w10 = fx * gy, w01 = gx * fy, w11 = fx * fy;
+      od[o]     = sd[i00]     * w00 + sd[i10]     * w10 + sd[i01]     * w01 + sd[i11]     * w11;
+      od[o + 1] = sd[i00 + 1] * w00 + sd[i10 + 1] * w10 + sd[i01 + 1] * w01 + sd[i11 + 1] * w11;
+      od[o + 2] = sd[i00 + 2] * w00 + sd[i10 + 2] * w10 + sd[i01 + 2] * w01 + sd[i11 + 2] * w11;
       od[o + 3] = 255;
     }
   }
@@ -987,7 +995,9 @@ function warp(srcCanvas, corners, maxOut) {
 /* ============================== 3) 그림자 제거 + 글씨 또렷하게 */
 function boxMean(gray, w, h, r) {
   const iw = w + 1;
-  const ii = new Float64Array(iw * (h + 1));
+  // 0~255 의 합이라 Int32 로 충분하다(255 * 4M ≒ 10억 < 2^31).
+  // Float64 를 쓰면 메모리를 두 배로 읽고 쓰게 되어 그만큼 느려진다.
+  const ii = new Int32Array(iw * (h + 1));
   for (let y = 0; y < h; y++) {
     let row = 0;
     for (let x = 0; x < w; x++) {
@@ -1113,37 +1123,51 @@ self.onmessage = async (e) => {
 };`;
 }
 
-let procWorker, workerSeq = 0, workerDead = false;
+// 사진 여러 장을 동시에 처리하려면 워커도 여러 개여야 한다.
+// 화면 갱신용으로 코어 하나는 남겨 둔다.
+const POOL_SIZE = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
+
+let pool = null, workerSeq = 0, workerDead = false;
 const workerJobs = new Map();
 
-function getWorker() {
-  if (procWorker || workerDead) return procWorker;
+function getPool() {
+  if (pool || workerDead) return pool;
   try {
     if (typeof Worker === "undefined" || typeof OffscreenCanvas === "undefined") throw 0;
     const url = URL.createObjectURL(new Blob([workerSource()], { type: "text/javascript" }));
-    procWorker = new Worker(url);
+    pool = [];
+    for (let i = 0; i < POOL_SIZE; i++) {
+      const w = new Worker(url);
+      w.busy = 0;
+      w.onmessage = e => {
+        w.busy--;
+        const job = workerJobs.get(e.data.id);
+        if (!job) return;
+        workerJobs.delete(e.data.id);
+        e.data.ok ? job.res(e.data.r) : job.rej(new Error(e.data.error));
+      };
+      w.onerror = () => {                        // 하나라도 죽으면 메인 스레드로
+        workerDead = true;
+        pool = null;
+        workerJobs.forEach(j => j.rej(new Error("워커 오류")));
+        workerJobs.clear();
+      };
+      pool.push(w);
+    }
     URL.revokeObjectURL(url);
-    procWorker.onmessage = e => {
-      const job = workerJobs.get(e.data.id);
-      if (!job) return;
-      workerJobs.delete(e.data.id);
-      e.data.ok ? job.res(e.data.r) : job.rej(new Error(e.data.error));
-    };
-    procWorker.onerror = () => {                 // 워커를 못 쓰면 메인에서 처리
-      workerDead = true;
-      procWorker = null;
-      workerJobs.forEach(j => j.rej(new Error("워커 오류")));
-      workerJobs.clear();
-    };
   } catch (e) {
-    workerDead = true; procWorker = null;
+    workerDead = true; pool = null;
   }
-  return procWorker;
+  return pool;
 }
 
 function runProcess(blob, opts) {
-  const w = getWorker();
-  if (!w) return processImage(blob, opts);       // 폴백: 메인 스레드
+  const p = getPool();
+  if (!p || !p.length) return processImage(blob, opts);   // 폴백: 메인 스레드
+  // 가장 한가한 워커에게 준다
+  let w = p[0];
+  for (const c of p) if (c.busy < w.busy) w = c;
+  w.busy++;
   return new Promise((res, rej) => {
     const id = ++workerSeq;
     workerJobs.set(id, { res, rej });
@@ -1152,6 +1176,18 @@ function runProcess(blob, opts) {
     console.warn("워커 처리 실패, 메인 스레드로 대체:", err);
     return processImage(blob, opts);
   });
+}
+
+/** 목록을 POOL_SIZE 만큼 동시에 돌린다. 순서는 각 항목이 알아서 채우므로 상관없다. */
+async function runPooled(items, fn) {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(POOL_SIZE, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
 }
 
 /** @param {boolean} first 처음 넣는 사진이면 축소한 원본도 함께 받아 보관한다 */
@@ -1191,28 +1227,29 @@ async function addFiles(files) {
   render();
 
   const failed = [];
+  let done = 0;
   try {
-    for (let i = 0; i < added.length; i++) {
-      busy(true, `보정 중… ${i + 1}/${added.length}`, i / added.length);
-      await nextFrame();
-      const p = added[i];
+    // 여러 장을 동시에 돌린다. 각 페이지는 자기 자리를 채우므로 완료 순서는 상관없다.
+    await runPooled(added, async (p, i) => {
       try {
         await renderPage(p, true);      // 축소한 원본 보관까지 한 번에
       } catch (e) {
         // 읽지 못한 사진은 목록에 남기지 않는다.
         // (남겨두면 PDF 만들 때 빈 페이지로 걸려 앱이 멈춘다)
-        console.error("사진 처리 실패:", p.srcBlob && p.srcBlob.name, e);
+        console.error("사진 처리 실패:", list[i] && list[i].name, e);
         failed.push(list[i] ? list[i].name : "");
         const at = state.pages.indexOf(p);
         if (at >= 0) state.pages.splice(at, 1);
         await DB.delPage(p.id);
-        render();
-        continue;
+        done++; render();
+        return;
       }
       p.busy = false;
+      done++;
+      busy(true, `보정 중… ${done}/${added.length}`, done / added.length);
       render();
       await DB.savePage(p, state.pages.indexOf(p));
-    }
+    });
   } finally {
     busy(false);
   }
@@ -1596,7 +1633,6 @@ function closeCam() {
 }
 
 const shotQueue = [];
-let draining = false;
 
 async function shoot() {
   const v = $("#video");
@@ -1614,33 +1650,41 @@ async function shoot() {
   drainShots();
 }
 
-// 촬영은 막지 않고, 뒤에서 한 장씩 조용히 보정한다
-async function drainShots() {
-  if (draining) return;
-  draining = true;
-  while (shotQueue.length) {
+// 촬영은 막지 않고 뒤에서 조용히 보정한다.
+// 워커 수만큼 동시에 돌려, 셔터를 빠르게 눌러도 큐가 밀리지 않게 한다.
+let inFlight = 0;
+function drainShots() {
+  while (shotQueue.length && inFlight < POOL_SIZE) {
     const f = shotQueue.shift();
     const page = {
       id: newId(), srcBlob: f, outBlob: null, url: null,
       corners: undefined, rot: 0, filter: state.settings.filter, busy: true
     };
-    state.pages.push(page); render();
-    try {
-      await renderPage(page, true);     // 축소한 원본 보관까지 한 번에
-    } catch (e) {
-      // 처리하지 못한 사진은 목록에 남기지 않는다. 남겨두면 "보정 중…" 상태로
-      // 계속 보이고, 저장까지 되어 다시 켰을 때 되살아난다.
-      console.error("촬영 사진 처리 실패:", e);
-      const at = state.pages.indexOf(page);
-      if (at >= 0) state.pages.splice(at, 1);
-      render();
-      toast("사진 한 장을 처리하지 못했어요");
-      continue;
-    }
-    page.busy = false; render();
-    await DB.savePage(page, state.pages.indexOf(page));
+    // 큐에서 꺼낸 순서대로 바로 넣어야 페이지 순서가 촬영 순서와 같아진다
+    state.pages.push(page);
+    inFlight++;
+    render();
+
+    (async () => {
+      try {
+        await renderPage(page, true);   // 축소한 원본 보관까지 한 번에
+        page.busy = false;
+        render();
+        await DB.savePage(page, state.pages.indexOf(page));
+      } catch (e) {
+        // 처리하지 못한 사진은 목록에 남기지 않는다. 남겨두면 "보정 중…" 상태로
+        // 계속 보이고, 저장까지 되어 다시 켰을 때 되살아난다.
+        console.error("촬영 사진 처리 실패:", e);
+        const at = state.pages.indexOf(page);
+        if (at >= 0) state.pages.splice(at, 1);
+        render();
+        toast("사진 한 장을 처리하지 못했어요");
+      } finally {
+        inFlight--;
+        drainShots();                   // 큐에 남은 게 있으면 이어서
+      }
+    })();
   }
-  draining = false;
 }
 
 /* =============================================================== 설정 */
@@ -1759,7 +1803,7 @@ window.addEventListener("beforeunload", e => {
 })();
 
 // 테스트/자동화용
-window.__scanner = { state, buildPdf, detectCorners, warp, enhance, addFiles, makePdf, renderPage, estimateAspect, homography };
+window.__scanner = { state, buildPdf, detectCorners, warp, enhance, addFiles, makePdf, renderPage, estimateAspect, homography, processImage, runProcess };
 </script>
 </body>
 </html>
