@@ -763,6 +763,85 @@ function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean) {
 }
 
 /**
+ * 대충 잡은 사각형을 원본 해상도에서 다시 맞춘다.
+ *
+ * 감지는 420px 로 줄여서 하므로, 거기서 생긴 1px 오차가 원본에서는
+ * 2~3px 로 확대된다. 각 변을 따라가며 원본에서 밝기가 가장 급하게
+ * 변하는 지점을 부분화소까지 찾아 직선을 다시 맞추고, 이웃 직선을
+ * 교차시켜 꼭짓점을 구한다. 확대로 생긴 오차가 사라진다.
+ *
+ * 경계가 흐릿하거나 결과가 원래 위치에서 크게 벗어나면 null 을 돌려
+ * 호출부가 기존(대충 잡은) 값을 그대로 쓰게 한다.
+ */
+function refineOnSource(canvas, quad) {
+  const w = canvas.width, h = canvas.height;
+  if (w < 40 || h < 40) return null;
+  const im = canvas.getContext("2d", { willReadFrequently: true })
+                   .getImageData(0, 0, w, h).data;
+
+  const lum = (x, y) => {
+    const xi = x < 0 ? 0 : (x > w - 1 ? w - 1 : x | 0);
+    const yi = y < 0 ? 0 : (y > h - 1 ? h - 1 : y | 0);
+    const i = (yi * w + xi) * 4;
+    return (im[i] * 299 + im[i + 1] * 587 + im[i + 2] * 114) / 1000;
+  };
+
+  const lines = [];
+  for (let e = 0; e < 4; e++) {
+    const a = quad[e], b = quad[(e + 1) % 4];
+    const len = dist(a, b);
+    if (len < 20) return null;
+    const nx = -(b[1] - a[1]) / len, ny = (b[0] - a[0]) / len;   // 변의 법선
+    const R = Math.max(3, Math.min(24, Math.round(len * 0.03))); // 탐색 반경
+    const M = 2 * R + 1;
+    const g = new Float32Array(M);
+    const pts = [];
+
+    const N = 64;
+    for (let k = 0; k <= N; k++) {
+      const t = 0.08 + 0.84 * (k / N);            // 모서리 부근은 제외
+      const px = a[0] + t * (b[0] - a[0]), py = a[1] + t * (b[1] - a[1]);
+
+      // 법선 방향 밝기 프로파일의 기울기
+      let peak = -1, best = 0;
+      for (let si = 1; si < M - 1; si++) {
+        const o = si - R;
+        g[si] = Math.abs(lum(px + nx * (o + 1), py + ny * (o + 1))
+                       - lum(px + nx * (o - 1), py + ny * (o - 1)));
+        if (g[si] > best) { best = g[si]; peak = si; }
+      }
+      if (peak < 1 || peak > M - 2 || best < 10) continue;       // 경계가 흐림
+
+      // 꼭짓점 세 개로 포물선을 맞춰 부분화소 위치를 얻는다
+      const gm = g[peak - 1], g0 = g[peak], gp = g[peak + 1];
+      const den = gm - 2 * g0 + gp;
+      const sub = Math.abs(den) > 1e-6 ? clamp(0.5 * (gm - gp) / den, -1, 1) : 0;
+      const off = (peak - R) + sub;
+      pts.push([px + nx * off, py + ny * off]);
+    }
+    if (pts.length < 12) return null;
+
+    // 튀는 점을 걸러내고 다시 맞춘다
+    let L = fitLine(pts);
+    const resid = pts.map(q => Math.abs(L[0] * q[0] + L[1] * q[1] - L[2]));
+    const med = resid.slice().sort((x, y) => x - y)[resid.length >> 1];
+    const keep = pts.filter((q, i) => resid[i] <= Math.max(1.5, med * 2.5));
+    if (keep.length >= 12) L = fitLine(keep);
+    lines.push(L);
+  }
+
+  const out = [];
+  for (let i = 0; i < 4; i++) {
+    const p = lineCross(lines[(i + 3) % 4], lines[i]);
+    if (!p) return null;
+    const limit = Math.max(8, dist(quad[i], quad[(i + 1) % 4]) * 0.06);
+    if (dist(p, quad[i]) > limit) return null;   // 너무 멀리 튀면 믿지 않는다
+    out.push(p);
+  }
+  return out;
+}
+
+/**
  * 종이 영역을 자동으로 찾는다.
  *
  * 임계값 하나로 자르면 그림자 진 모서리가 잘려 나가거나(조명 얼룩),
@@ -859,7 +938,9 @@ function detectCorners(canvas) {
   if (bestRatio > 0.955) return null;      // 종이가 화면을 꽉 채움 → 자를 것 없음
   // 경계도 흐릿하고 안팎 밝기 차도 없으면 종이가 아니다 (책상 무늬 등 오검출 방지)
   if (bestInfo.edge < 0.34 && bestInfo.contrast < 5) return null;
-  return best.map(p => [clamp(p[0], 0, w) / s, clamp(p[1], 0, h) / s]);
+
+  const coarse = best.map(p => [clamp(p[0], 0, w) / s, clamp(p[1], 0, h) / s]);
+  return refineOnSource(canvas, coarse) || coarse;
 }
 
 /* ================================== 2) 원근 보정(사다리꼴 → 직사각형) */
@@ -1102,7 +1183,7 @@ const PROC_FNS = [
   clamp, dist, cross3, mkCanvas, canvasToBlob, blobToCanvas,
   otsu, maskIntegral, closeMask, largestBlob, borderPoints, convexHull, simplifyHull,
   maxAreaQuad, fitLine, lineFrom, lineCross, refineQuad, orderCorners, polyArea,
-  scoreQuad, detectCorners, solve, homography, estimateAspect, warp, boxMean, enhance,
+  scoreQuad, refineOnSource, detectCorners, solve, homography, estimateAspect, warp, boxMean, enhance,
   processImage
 ];
 
