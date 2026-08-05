@@ -1211,6 +1211,10 @@ const POOL_SIZE = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) -
 let pool = null, workerSeq = 0, workerDead = false;
 const workerJobs = new Map();
 
+// 촬영 중에는 동시 처리 수를 줄여 카메라 파이프라인에 CPU 를 양보한다.
+let poolLimit = POOL_SIZE;
+function setPoolLimit(n) { poolLimit = Math.max(1, Math.min(POOL_SIZE, n)); }
+
 function getPool() {
   if (pool || workerDead) return pool;
   try {
@@ -1262,7 +1266,7 @@ function runProcess(blob, opts) {
 /** 목록을 POOL_SIZE 만큼 동시에 돌린다. 순서는 각 항목이 알아서 채우므로 상관없다. */
 async function runPooled(items, fn) {
   let next = 0;
-  const workers = Array.from({ length: Math.min(POOL_SIZE, items.length) }, async () => {
+  const workers = Array.from({ length: Math.min(poolLimit, items.length) }, async () => {
     while (next < items.length) {
       const i = next++;
       await fn(items[i], i);
@@ -1691,14 +1695,30 @@ async function openCam() {
     $("#fileShot").click(); return;                      // 카메라 앱으로 대체
   }
   try {
+    // 예전엔 2400x3200(7.7MP)을 요청해 폭 400px 화면에 그렸다. 폰이 초당
+    // 200MP 넘게 옮기느라 미리보기가 실제보다 한 박자 늦었다.
+    //
+    // 1500x2000(3MP)이면 부담이 2.6배 줄면서도, 종이가 화면을 채울 때
+    // 잘라낸 페이지가 결과 상한(1700px)에 딱 맞아 화질 손해가 없다.
+    //
+    // 세로로 요청하는 게 중요하다. 같은 3MP 라도 가로(2000x1500)로 받으면
+    // 폰을 세로로 든 상태에서 종이가 프레임의 일부만 차지해 1350px 로 떨어진다.
     cam.stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" }, width: { ideal: 2400 }, height: { ideal: 3200 } },
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1500 }, height: { ideal: 2000 },
+        frameRate: { ideal: 30 }
+      },
       audio: false
     });
   } catch (e) {
     toast("카메라를 열 수 없어 촬영 앱으로 대체합니다");
     $("#fileShot").click(); return;
   }
+
+  // 보정이 CPU를 다 쓰면 카메라 파이프라인이 밀린다. 촬영 중에는 양보한다.
+  setPoolLimit(POOL_SIZE - 2);
+
   cam.count = 0;
   $("#camCount").textContent = "0장";
   const v = $("#video");
@@ -1709,12 +1729,17 @@ async function openCam() {
 
 function closeCam() {
   $("#cam").classList.remove("on");
+  setPoolLimit(POOL_SIZE);        // 촬영이 끝났으니 남은 큐를 전력으로 처리
+  drainShots();
   if (cam.stream) { cam.stream.getTracks().forEach(t => t.stop()); cam.stream = null; }
   $("#video").srcObject = null;
 }
 
 const shotQueue = [];
 
+// 셔터는 즉시 반응해야 한다. ImageCapture.takePhoto() 는 컷마다 수백 ms 가
+// 걸리고 그 사이 스트림이 끊기면 그 컷이 통째로 사라져서 쓰지 않는다.
+// 현재 미리보기 프레임을 그대로 가져온다.
 async function shoot() {
   const v = $("#video");
   if (!v.videoWidth) return;
@@ -1735,7 +1760,7 @@ async function shoot() {
 // 워커 수만큼 동시에 돌려, 셔터를 빠르게 눌러도 큐가 밀리지 않게 한다.
 let inFlight = 0;
 function drainShots() {
-  while (shotQueue.length && inFlight < POOL_SIZE) {
+  while (shotQueue.length && inFlight < poolLimit) {
     const f = shotQueue.shift();
     const page = {
       id: newId(), srcBlob: f, outBlob: null, url: null,
