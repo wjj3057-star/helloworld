@@ -404,7 +404,13 @@ let orderChain = Promise.resolve();
 function persistOrder() {
   orderChain = orderChain.then(async () => {
     const snapshot = state.pages.slice();
-    for (let i = 0; i < snapshot.length; i++) await DB.savePage(snapshot[i], i);
+    for (let i = 0; i < snapshot.length; i++) {
+      // 아직 보정 중인 페이지는 저장하지 않는다. 결과물이 없는 상태로 저장되면
+      // 다시 켰을 때 "보정 중…"에서 영영 멈춘 빈 페이지가 되살아난다.
+      // 끝나는 즉시 자기 자리를 저장하므로 빠뜨리지도 않는다.
+      if (snapshot[i].busy) continue;
+      await DB.savePage(snapshot[i], i);
+    }
   }).catch(e => console.error("순서 저장 실패:", e));
   return orderChain;
 }
@@ -426,10 +432,20 @@ function canvasToBlob(canvas, quality) {
   return new Promise(res => canvas.toBlob(res, "image/jpeg", quality));
 }
 
-async function blobToCanvas(blob, maxDim) {
+/**
+ * Blob 또는 이미 디코드된 ImageBitmap 을 캔버스로 만든다.
+ *
+ * 연속 촬영은 비트맵을 그대로 넘긴다. 프레임을 JPEG 로 구웠다가 다시 푸는
+ * 왕복(3MP 기준 인코드 1.4초 + 디코드)이 통째로 사라진다.
+ */
+async function blobToCanvas(src, maxDim) {
   let bmp;
-  try { bmp = await createImageBitmap(blob, { imageOrientation: "from-image" }); }
-  catch { bmp = await createImageBitmap(blob); }
+  if (typeof ImageBitmap !== "undefined" && src instanceof ImageBitmap) {
+    bmp = src;
+  } else {
+    try { bmp = await createImageBitmap(src, { imageOrientation: "from-image" }); }
+    catch { bmp = await createImageBitmap(src); }
+  }
   const s = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
   const w = Math.max(1, Math.round(bmp.width * s));
   const h = Math.max(1, Math.round(bmp.height * s));
@@ -1356,62 +1372,184 @@ self.onmessage = async (e) => {
 };`;
 }
 
+/* ---- 프레임 잡기 전용 워커 -----------------------------------------
+   셔터를 누른 순간 미리보기에서 한 컷을 떠 오는 일(createImageBitmap)은
+   비동기처럼 생겼지만 실제로는 메인 스레드를 붙잡는다. 실측으로 매 컷 12ms,
+   첫 컷은 56ms 였고 이게 "셔터를 누를 때마다 화면이 멎는" 마지막 원인이었다.
+
+   MediaStreamTrackProcessor 로 카메라 프레임을 워커로 직접 흘려보내면,
+   메인 스레드가 할 일은 "지금 한 장" 이라고 말하는 것뿐이다. 워커는 늘
+   최신 프레임 하나만 들고 있다가 그것을 비트맵으로 만들어 넘겨준다. */
+function grabberSource() {
+  return `
+let latest = null, reader = null;
+self.onmessage = async (e) => {
+  const d = e.data;
+  if (d.readable) {                       // 카메라 프레임 흐름을 넘겨받는다
+    reader = d.readable.getReader();
+    (async () => {
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (latest) latest.close();     // 최신 한 장만 들고 있는다.
+          latest = value;                 // 쌓아두면 카메라 파이프라인이 막힌다.
+        }
+      } catch (err) {}
+    })();
+    return;
+  }
+  if (d.grab) {
+    if (!latest) { self.postMessage({ id: d.grab, ok: false }); return; }
+    try {
+      const bmp = await createImageBitmap(latest);
+      self.postMessage({ id: d.grab, ok: true, bmp }, [bmp]);
+    } catch (err) {
+      self.postMessage({ id: d.grab, ok: false });
+    }
+    return;
+  }
+  if (d.stop) {
+    try { if (latest) latest.close(); } catch (err) {}
+    latest = null;
+    try { if (reader) reader.cancel(); } catch (err) {}
+    reader = null;
+  }
+};`;
+}
+
+const grabber = { w: null, seq: 0, waiting: new Map() };
+
+/** @returns {boolean} 프레임 잡기를 워커로 넘겼는가 */
+function startGrabber(track) {
+  stopGrabber();                              // 이전 것이 남아 있으면 먼저 정리
+  if (typeof MediaStreamTrackProcessor === "undefined" || typeof Worker === "undefined") return false;
+  try {
+    const proc = new MediaStreamTrackProcessor({ track });
+    const url = URL.createObjectURL(new Blob([grabberSource()], { type: "text/javascript" }));
+    const w = new Worker(url);
+    URL.revokeObjectURL(url);
+    w.onmessage = e => {
+      const done = grabber.waiting.get(e.data.id);
+      if (!done) { if (e.data.bmp && e.data.bmp.close) e.data.bmp.close(); return; }
+      grabber.waiting.delete(e.data.id);
+      done(e.data.ok ? e.data.bmp : null);
+    };
+    w.onerror = () => stopGrabber();          // 실패하면 메인 스레드 방식으로 되돌아간다
+    w.postMessage({ readable: proc.readable }, [proc.readable]);
+    grabber.w = w;
+    return true;
+  } catch (e) {
+    console.warn("프레임 워커를 쓸 수 없어 메인 스레드로 잡습니다:", e);
+    return false;
+  }
+}
+
+function stopGrabber() {
+  if (!grabber.w) return;
+  try { grabber.w.postMessage({ stop: true }); grabber.w.terminate(); } catch (e) {}
+  grabber.w = null;
+  grabber.waiting.forEach(done => done(null));   // 기다리던 컷은 폴백으로 넘긴다
+  grabber.waiting.clear();
+}
+
+/** @returns {Promise<ImageBitmap|null>} 워커가 없거나 실패하면 null */
+function grabFrame() {
+  if (!grabber.w) return Promise.resolve(null);
+  const id = ++grabber.seq;
+  return new Promise(res => {
+    grabber.waiting.set(id, res);
+    grabber.w.postMessage({ grab: id });
+    // 워커가 대답하지 않아도 셔터가 영영 멈추지 않게 한다
+    setTimeout(() => { if (grabber.waiting.delete(id)) res(null); }, 3000);
+  });
+}
+
 // 사진 여러 장을 동시에 처리하려면 워커도 여러 개여야 한다.
 // 화면 갱신용으로 코어 하나는 남겨 둔다.
 const POOL_SIZE = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
 
-let pool = null, workerSeq = 0, workerDead = false;
+let pool = null, poolUrl = null, workerSeq = 0, workerDead = false;
 const workerJobs = new Map();
 
 // 촬영 중에는 동시 처리 수를 줄여 카메라 파이프라인에 CPU 를 양보한다.
 let poolLimit = POOL_SIZE;
 function setPoolLimit(n) { poolLimit = Math.max(1, Math.min(POOL_SIZE, n)); }
 
+function makeWorker() {
+  const w = new Worker(poolUrl);
+  w.busy = 0;
+  w.onmessage = e => {
+    w.busy--;
+    const job = workerJobs.get(e.data.id);
+    if (!job) return;
+    workerJobs.delete(e.data.id);
+    e.data.ok ? job.res(e.data.r) : job.rej(new Error(e.data.error));
+  };
+  w.onerror = () => {                        // 하나라도 죽으면 메인 스레드로
+    workerDead = true;
+    pool = null;
+    workerJobs.forEach(j => j.rej(new Error("워커 오류")));
+    workerJobs.clear();
+  };
+  return w;
+}
+
+/**
+ * 워커를 미리 만들어 둔다.
+ *
+ * 예전에는 첫 촬영 때 POOL_SIZE 개를 한꺼번에 만들었다. 그 한 번이 메인
+ * 스레드를 103ms 붙잡아(실측) 첫 셔터에서만 화면이 눈에 띄게 멎었다.
+ * 카메라를 여는 순간부터 구도를 잡는 1~2초 동안 한 개씩 나눠 만든다.
+ */
+function warmPool() {
+  if (!getPool()) return;
+  const idle = window.requestIdleCallback || (f => setTimeout(f, 30));
+  const step = () => {
+    if (workerDead || !pool || pool.length >= POOL_SIZE) {
+      // 다 만들었으면 소스 주소를 놓아준다(이미 만들어진 워커는 영향 없음)
+      if (poolUrl && pool && pool.length >= POOL_SIZE) { URL.revokeObjectURL(poolUrl); poolUrl = null; }
+      return;
+    }
+    try { pool.push(makeWorker()); } catch { return; }
+    idle(step);
+  };
+  idle(step);
+}
+
 function getPool() {
   if (pool || workerDead) return pool;
   try {
     if (typeof Worker === "undefined" || typeof OffscreenCanvas === "undefined") throw 0;
-    const url = URL.createObjectURL(new Blob([workerSource()], { type: "text/javascript" }));
-    pool = [];
-    for (let i = 0; i < POOL_SIZE; i++) {
-      const w = new Worker(url);
-      w.busy = 0;
-      w.onmessage = e => {
-        w.busy--;
-        const job = workerJobs.get(e.data.id);
-        if (!job) return;
-        workerJobs.delete(e.data.id);
-        e.data.ok ? job.res(e.data.r) : job.rej(new Error(e.data.error));
-      };
-      w.onerror = () => {                        // 하나라도 죽으면 메인 스레드로
-        workerDead = true;
-        pool = null;
-        workerJobs.forEach(j => j.rej(new Error("워커 오류")));
-        workerJobs.clear();
-      };
-      pool.push(w);
-    }
-    URL.revokeObjectURL(url);
+    poolUrl = URL.createObjectURL(new Blob([workerSource()], { type: "text/javascript" }));
+    pool = [makeWorker()];        // 우선 하나만. 나머지는 warmPool 이 한가할 때 채운다.
   } catch (e) {
     workerDead = true; pool = null;
   }
   return pool;
 }
 
-function runProcess(blob, opts) {
+/** @param {Blob|ImageBitmap} src 원본. 비트맵이면 복사 없이 워커로 넘긴다. */
+function runProcess(src, opts) {
   const p = getPool();
-  if (!p || !p.length) return processImage(blob, opts);   // 폴백: 메인 스레드
+  if (!p || !p.length) return processImage(src, opts);   // 폴백: 메인 스레드
   // 가장 한가한 워커에게 준다
   let w = p[0];
   for (const c of p) if (c.busy < w.busy) w = c;
   w.busy++;
+  // 비트맵은 넘겨주기(transfer)로 보낸다. 3MP 픽셀을 복사하지 않으므로
+  // 셔터를 눌러도 메인 스레드가 멎지 않는다. 대신 넘긴 뒤에는 이쪽에서 쓸 수 없다.
+  const moved = typeof ImageBitmap !== "undefined" && src instanceof ImageBitmap;
   return new Promise((res, rej) => {
     const id = ++workerSeq;
     workerJobs.set(id, { res, rej });
-    w.postMessage({ id, blob, opts });
+    w.postMessage({ id, blob: src, opts }, moved ? [src] : []);
   }).catch(err => {
+    // 넘겨준 비트맵은 이미 이쪽에 없다 → 메인 스레드로 다시 할 수 없다.
+    // 호출부가 그 페이지를 목록에서 빼고 알려 준다.
+    if (moved) throw err;
     console.warn("워커 처리 실패, 메인 스레드로 대체:", err);
-    return processImage(blob, opts);
+    return processImage(src, opts);
   });
 }
 
@@ -1429,7 +1567,11 @@ async function runPooled(items, fn) {
 
 /** @param {boolean} first 처음 넣는 사진이면 축소한 원본도 함께 받아 보관한다 */
 async function renderPage(page, first) {
-  const r = await runProcess(page.srcBlob, {
+  // 갓 찍은 사진은 아직 파일이 아니라 프레임(비트맵)이다. 워커가 그것으로
+  // 보관용 srcBlob 을 만들어 돌려주고, 넘겨준 비트맵은 여기서 지운다.
+  const input = page.srcBmp || page.srcBlob;
+  page.srcBmp = null;
+  const r = await runProcess(input, {
     corners: page.corners, filter: page.filter, rot: page.rot,
     srcMax: SRC_MAX, outMax: OUT_MAX, quality: state.settings.quality,
     makeSrc: !!first
@@ -1527,34 +1669,80 @@ async function removePage(idx) {
 }
 
 /* =============================================================== 렌더 */
+/*
+   목록은 통째로 다시 만들지 않는다. 예전에는 render() 마다 grid.innerHTML=""
+   로 전부 버리고 다시 만들었는데, 한 장 찍을 때마다 두 번 불리므로 30장쯤
+   쌓이면 매번 카드 30개와 썸네일 30장을 다시 만들어 화면이 눈에 띄게 걸렸다
+   (실측 최악 88ms). 카드를 페이지별로 들고 있다가 바뀐 것만 고친다.
+*/
+const cards = new Map();          // page.id → { el, wrap, numEl, thumb, num, url }
+
+function makeCard(p) {
+  const el = document.createElement("div");
+  el.className = "card";
+  el.innerHTML = `
+    <div class="thumbwrap"><span class="num"></span></div>
+    <div class="row">
+      <button data-a="left"  title="앞으로">◀</button>
+      <button data-a="edit"  title="편집">✎</button>
+      <button data-a="right" title="뒤로">▶</button>
+      <button data-a="del" class="del" title="삭제">🗑</button>
+    </div>`;
+  // 순서가 바뀌어도 맞도록 자리번호는 누를 때 다시 찾는다
+  const at = fn => () => { const i = state.pages.indexOf(p); if (i >= 0) fn(i); };
+  el.querySelector('[data-a="left"]').onclick  = at(i => movePage(i, -1));
+  el.querySelector('[data-a="right"]').onclick = at(i => movePage(i, 1));
+  el.querySelector('[data-a="del"]').onclick   = at(i => removePage(i));
+  el.querySelector('[data-a="edit"]').onclick  = at(i => openEditor(i));
+  return {
+    el, wrap: el.querySelector(".thumbwrap"), numEl: el.querySelector(".num"),
+    thumb: null, num: 0, url: undefined, open: at(i => openEditor(i))
+  };
+}
+
 function render() {
   const grid = $("#grid");
-  grid.innerHTML = "";
   $("#empty").style.display = state.pages.length ? "none" : "";
   $("#count").textContent = `${state.pages.length}장`;
   $("#btnPdf").disabled = state.pages.length === 0;
 
+  // 없어진 페이지의 카드부터 걷어낸다
+  const alive = new Set(state.pages.map(p => p.id));
+  for (const [id, c] of cards) {
+    if (!alive.has(id)) { c.el.remove(); cards.delete(id); }
+  }
+
   state.pages.forEach((p, i) => {
-    const card = document.createElement("div");
-    card.className = "card";
-    card.innerHTML = `
-      <div class="thumbwrap">
-        <span class="num">${i + 1}</span>
-        ${p.busy || !p.url ? `<div class="spin">보정 중…</div>` : `<img alt="${i + 1}번 페이지" src="${p.url}">`}
-      </div>
-      <div class="row">
-        <button data-a="left"  title="앞으로">◀</button>
-        <button data-a="edit"  title="편집">✎</button>
-        <button data-a="right" title="뒤로">▶</button>
-        <button data-a="del" class="del" title="삭제">🗑</button>
-      </div>`;
-    card.querySelector('[data-a="left"]').onclick = () => movePage(i, -1);
-    card.querySelector('[data-a="right"]').onclick = () => movePage(i, 1);
-    card.querySelector('[data-a="del"]').onclick = () => removePage(i);
-    card.querySelector('[data-a="edit"]').onclick = () => openEditor(i);
-    const img = card.querySelector("img");
-    if (img) img.onclick = () => openEditor(i);
-    grid.appendChild(card);
+    let c = cards.get(p.id);
+    if (!c) { c = makeCard(p); cards.set(p.id, c); }
+
+    if (c.num !== i + 1) {
+      c.num = i + 1;
+      c.numEl.textContent = c.num;
+      if (c.thumb && c.thumb.tagName === "IMG") c.thumb.alt = `${c.num}번 페이지`;
+    }
+
+    // 썸네일은 주소가 실제로 바뀌었을 때만 갈아 끼운다(그래야 다시 안 그린다)
+    const url = p.busy ? null : p.url;
+    if (c.url !== url) {
+      c.url = url;
+      if (c.thumb) c.thumb.remove();
+      if (url) {
+        const img = document.createElement("img");
+        img.alt = `${c.num}번 페이지`;
+        img.src = url;
+        img.onclick = c.open;
+        c.thumb = img;
+      } else {
+        const d = document.createElement("div");
+        d.className = "spin";
+        d.textContent = "보정 중…";
+        c.thumb = d;
+      }
+      c.wrap.appendChild(c.thumb);
+    }
+
+    if (grid.children[i] !== c.el) grid.insertBefore(c.el, grid.children[i] || null);
   });
 }
 
@@ -1870,6 +2058,8 @@ async function openCam() {
 
   // 보정이 CPU를 다 쓰면 카메라 파이프라인이 밀린다. 촬영 중에는 양보한다.
   setPoolLimit(POOL_SIZE - 2);
+  // 첫 셔터에서 워커를 만드느라 멎지 않도록, 구도 잡는 동안 미리 만들어 둔다.
+  warmPool();
 
   cam.count = 0;
   $("#camCount").textContent = "0장";
@@ -1877,10 +2067,15 @@ async function openCam() {
   v.srcObject = cam.stream;
   await v.play().catch(() => {});
   $("#cam").classList.add("on");
+
+  // 프레임 잡기를 워커로 넘긴다. 안 되는 환경이면 셔터에서 직접 잡는다.
+  const track = cam.stream.getVideoTracks()[0];
+  if (track) startGrabber(track);
 }
 
 function closeCam() {
   $("#cam").classList.remove("on");
+  stopGrabber();
   setPoolLimit(POOL_SIZE);        // 촬영이 끝났으니 남은 큐를 전력으로 처리
   drainShots();
   if (cam.stream) { cam.stream.getTracks().forEach(t => t.stop()); cam.stream = null; }
@@ -1892,19 +2087,38 @@ const shotQueue = [];
 // 셔터는 즉시 반응해야 한다. ImageCapture.takePhoto() 는 컷마다 수백 ms 가
 // 걸리고 그 사이 스트림이 끊기면 그 컷이 통째로 사라져서 쓰지 않는다.
 // 현재 미리보기 프레임을 그대로 가져온다.
+//
+// 예전에는 여기서 캔버스에 그린 뒤(1500x2000 읽기에 145ms, 그동안 화면이 통째로
+// 멎음) JPEG 로 구웠다(3MP 에 1.4초, CPU 를 통째로 씀). 셔터를 누를 때마다
+// 미리보기가 멎은 이유가 이것이다. 게다가 워커는 그 JPEG 를 다시 풀어야 했다.
+//
+// 지금은 프레임 참조(ImageBitmap)만 만들어 워커로 넘겨준다. 메인 스레드는
+// 픽셀을 한 번도 만지지 않고, 굽고 다시 푸는 왕복도 통째로 없어진다.
 async function shoot() {
   const v = $("#video");
   if (!v.videoWidth) return;
-  const c = document.createElement("canvas");
-  c.width = v.videoWidth; c.height = v.videoHeight;
-  c.getContext("2d").drawImage(v, 0, 0);
-  const blob = await canvasToBlob(c, 0.92);
-  cam.count++;
-  $("#camCount").textContent = `${cam.count}장`;
+
+  // 숫자와 플래시가 먼저다. 픽셀 작업을 기다리게 하면 셔터감이 죽는다.
+  const n = ++cam.count;
+  $("#camCount").textContent = `${n}장`;
   const f = $("#flash");
   f.classList.add("on");
   setTimeout(() => f.classList.remove("on"), 20);
-  shotQueue.push(new File([blob], `shot_${String(cam.count).padStart(3, "0")}.jpg`, { type: "image/jpeg" }));
+
+  // 워커가 들고 있는 최신 프레임을 받아온다(메인 스레드는 픽셀을 안 만진다).
+  let bmp = await grabFrame();
+  if (!bmp) {
+    // 워커를 쓸 수 없는 환경 — 여기서 직접 잡는다(그만큼 잠깐 멎는다)
+    try { bmp = await createImageBitmap(v); }
+    catch (e) {
+      console.error("프레임을 담지 못했습니다:", e);
+      cam.count--;
+      $("#camCount").textContent = `${cam.count}장`;
+      toast("사진 한 장을 담지 못했어요");
+      return;
+    }
+  }
+  shotQueue.push({ bmp, name: `shot_${String(n).padStart(3, "0")}.jpg` });
   drainShots();
 }
 
@@ -1913,9 +2127,9 @@ async function shoot() {
 let inFlight = 0;
 function drainShots() {
   while (shotQueue.length && inFlight < poolLimit) {
-    const f = shotQueue.shift();
+    const shot = shotQueue.shift();
     const page = {
-      id: newId(), srcBlob: f, outBlob: null, url: null,
+      id: newId(), srcBlob: null, srcBmp: shot.bmp, outBlob: null, url: null,
       corners: undefined, rot: 0, filter: state.settings.filter, busy: true
     };
     // 큐에서 꺼낸 순서대로 바로 넣어야 페이지 순서가 촬영 순서와 같아진다
@@ -2047,12 +2261,14 @@ window.addEventListener("beforeunload", e => {
   const saved = await DB.loadSettings();
   if (saved) Object.assign(state.settings, saved);
 
-  const rows = await DB.allPages();
-  if (rows && rows.length) {
+  // 결과물이 없는 줄은 버린다. 예전 판에서 보정 중에 저장된 찌꺼기가 남아
+  // 있으면 "보정 중…"에서 멈춘 빈 페이지로 되살아나고 PDF 도 만들 수 없다.
+  const rows = (await DB.allPages() || []).filter(r => r && r.outBlob);
+  if (rows.length) {
     rows.sort((a, b) => a.order - b.order);
     state.pages = rows.map(r => ({
       id: r.id, srcBlob: r.srcBlob, outBlob: r.outBlob,
-      url: r.outBlob ? URL.createObjectURL(r.outBlob) : null,
+      url: URL.createObjectURL(r.outBlob),
       corners: r.corners, rot: r.rot || 0, filter: r.filter || "doc", busy: false
     }));
     toast(`이전 작업 ${state.pages.length}장을 불러왔어요`);
@@ -2061,7 +2277,7 @@ window.addEventListener("beforeunload", e => {
 })();
 
 // 테스트/자동화용
-window.__scanner = { state, buildPdf, detectCorners, warp, enhance, addFiles, makePdf, renderPage, estimateAspect, homography, processImage, runProcess };
+window.__scanner = { state, buildPdf, detectCorners, warp, enhance, addFiles, makePdf, renderPage, render, estimateAspect, homography, processImage, runProcess };
 </script>
 </body>
 </html>
