@@ -1844,19 +1844,33 @@ function drawCrop() {
 function startDrag(e, i) {
   e.preventDefault();
   const host = $("#cropHost");
-  const move = ev => {
-    const r = host.getBoundingClientRect();
-    const x = clamp((ev.clientX - r.left) / ed.scale, 0, ed.src.width);
-    const y = clamp((ev.clientY - r.top) / ed.scale, 0, ed.src.height);
+
+  // 끄는 동안 편집 화면은 고정이라 자리가 바뀌지 않는다. 한 번만 잰다.
+  // 손가락을 움직일 때마다 재면, 방금 옮겨 놓은 손잡이 때문에 브라우저가
+  // 매번 배치를 다시 계산해야 한다(쓰기 → 읽기 → 쓰기).
+  let rect = host.getBoundingClientRect();
+  const remeasure = () => { rect = host.getBoundingClientRect(); };
+
+  // 손가락 이벤트는 화면 주사율보다 빠르게 들어올 수 있다(기기에 따라 초당 240회).
+  // 그때마다 그리면 그릴 수 없는 그림을 그리느라 입력이 밀린다. 프레임당 한 번만 그린다.
+  let raf = 0, last = null;
+  const draw = () => {
+    raf = 0;
+    const x = clamp((last.clientX - rect.left) / ed.scale, 0, ed.src.width);
+    const y = clamp((last.clientY - rect.top) / ed.scale, 0, ed.src.height);
     ed.corners[i] = [x, y];
     drawCrop();
   };
+  const move = ev => { last = ev; if (!raf) raf = requestAnimationFrame(draw); };
   const up = () => {
+    if (raf) { cancelAnimationFrame(raf); draw(); }   // 마지막 위치를 빠뜨리지 않는다
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
+    window.removeEventListener("resize", remeasure);
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
+  window.addEventListener("resize", remeasure);
 }
 
 /** 적용 전에는 회전 결과가 미리보기에 안 나타나므로 버튼에 각도를 띄운다 */
