@@ -2080,14 +2080,7 @@ async function openCam() {
     //
     // 세로로 요청하는 게 중요하다. 같은 3MP 라도 가로(2000x1500)로 받으면
     // 폰을 세로로 든 상태에서 종이가 프레임의 일부만 차지해 1350px 로 떨어진다.
-    cam.stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: 1500 }, height: { ideal: 2000 },
-        frameRate: { ideal: 30 }
-      },
-      audio: false
-    });
+    await startStream();
   } catch (e) {
     toast("카메라를 열 수 없어 촬영 앱으로 대체합니다");
     $("#fileShot").click(); return;
@@ -2100,24 +2093,65 @@ async function openCam() {
 
   cam.count = 0;
   $("#camCount").textContent = "0장";
+  $("#cam").classList.add("on");
+}
+
+/** 카메라 하드웨어를 잡고 미리보기를 띄운다 */
+async function startStream() {
+  cam.stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: { ideal: "environment" },
+      width: { ideal: 1500 }, height: { ideal: 2000 },
+      frameRate: { ideal: 30 }
+    },
+    audio: false
+  });
+  // 잡는 사이에 화면을 벗어났으면 바로 놓아 준다
+  if (document.hidden) { stopStream(); throw new Error("화면이 가려짐");}
   const v = $("#video");
   v.srcObject = cam.stream;
   await v.play().catch(() => {});
-  $("#cam").classList.add("on");
-
   // 프레임 잡기를 워커로 넘긴다. 안 되는 환경이면 셔터에서 직접 잡는다.
   const track = cam.stream.getVideoTracks()[0];
   if (track) startGrabber(track);
 }
 
-function closeCam() {
-  $("#cam").classList.remove("on");
+/** 카메라 하드웨어를 놓아 준다(촬영 화면은 그대로 둘 수 있다) */
+function stopStream() {
   stopGrabber();
-  setPoolLimit(POOL_SIZE);        // 촬영이 끝났으니 남은 큐를 전력으로 처리
-  drainShots();
   if (cam.stream) { cam.stream.getTracks().forEach(t => t.stop()); cam.stream = null; }
   $("#video").srcObject = null;
 }
+
+function closeCam() {
+  $("#cam").classList.remove("on");
+  setPoolLimit(POOL_SIZE);        // 촬영이 끝났으니 남은 큐를 전력으로 처리
+  drainShots();
+  stopStream();
+}
+
+/**
+ * 화면을 벗어나면 카메라를 놓아 준다.
+ *
+ * 안 그러면 다른 앱으로 넘어가거나 화면을 꺼도 카메라가 계속 물려 있어서,
+ * 상단의 카메라 사용 표시가 남고 배터리가 닳는다. 다른 앱이 카메라를 못 쓰기도 한다.
+ * 돌아오면 다시 잡되, 촬영 화면과 지금까지 찍은 장수는 그대로 둔다.
+ */
+let camResuming = false;
+async function setCamActive(active) {
+  if (!$("#cam").classList.contains("on")) return;
+  if (!active) { stopStream(); return; }
+  if (cam.stream || camResuming) return;
+  camResuming = true;
+  try { await startStream(); }
+  catch (e) {
+    console.error("카메라를 다시 열지 못했습니다:", e);
+    if (!document.hidden) { toast("카메라를 다시 열지 못했어요"); closeCam(); }
+  } finally { camResuming = false; }
+}
+document.addEventListener("visibilitychange", () => setCamActive(!document.hidden));
+// 안드로이드 앱에서는 액티비티가 멈출 때도 불러 준다(웹뷰 가시성만으로는 늦다)
+window.__camActive = setCamActive;
 
 const shotQueue = [];
 

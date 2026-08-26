@@ -164,12 +164,31 @@ public class MainActivity extends Activity {
         handleBack();
     }
 
+    // 다른 앱으로 넘어가거나 화면이 꺼지면 카메라를 놓아 준다.
+    // 웹뷰의 문서 가시성 변화만 믿으면 늦거나 아예 오지 않는 기기가 있어
+    // 액티비티 생명주기에서 직접 알려 준다.
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (web != null) web.evaluateJavascript("window.__camActive && window.__camActive(false)", null);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (web != null) web.evaluateJavascript("window.__camActive && window.__camActive(true)", null);
+    }
+
     /** 웹 쪽에서 만든 PDF를 안드로이드 공유 시트로 넘긴다 */
     private class Bridge {
 
         @JavascriptInterface
         public void beginShare() {
             staged.clear();
+            // 지난번에 넘긴 임시 PDF 를 지운다. 안 지우면 공유할 때마다 캐시가 쌓여
+            // 앱 저장공간이 계속 불어난다. 이 시점이면 지난 공유는 이미 끝나 있다.
+            File[] old = new File(getCacheDir(), "share").listFiles();
+            if (old != null) for (File f : old) f.delete();
         }
 
         /** 파일 하나씩 받는다(한 번에 큰 문자열을 넘기지 않으려고 나눠서 받음) */
