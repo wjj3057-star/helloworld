@@ -757,13 +757,7 @@ function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean) {
   const contrast = stepN ? stepSum / stepN : 0;
 
   // 변을 따라 실제 경계(밝기 변화)가 있는가 — 가짜 사각형을 걸러내는 핵심
-  //
-  // 세기(edge)와 함께 "끊기지 않고 이어지는가"(cont)도 잰다. 이 둘은 다르다.
-  //  · 종이 테두리 — 아무리 흐려도 네 변을 빙 둘러 끊김 없이 이어진다
-  //  · 글씨 덩어리의 외곽 — 획 끝에서만 강하고 줄과 줄 사이는 비어 있다
-  // 세기만 보면 후자가 이긴다. 이어짐까지 봐야 둘이 갈린다.
-  const contThr = Math.max(2, gradMean * 0.8);
-  let gs = 0, gn = 0, gc = 0;
+  let gs = 0, gn = 0;
   for (let i = 0; i < 4; i++) {
     const a = quad[i], b = quad[(i + 1) % 4];
     const steps = Math.max(8, Math.round(dist(a, b) / 2));
@@ -775,11 +769,9 @@ function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean) {
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++)
         m = Math.max(m, grad[(y+dy) * w + x+dx]);
       gs += m; gn++;
-      if (m >= contThr) gc++;
     }
   }
   const edge = clamp((gs / Math.max(1, gn)) / Math.max(6, gradMean * 3.2), 0, 1);
-  const cont = gc / Math.max(1, gn);
 
   if (fill < 0.72 || cover < 0.55) return null;
 
@@ -796,7 +788,41 @@ function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean) {
   const ink = clamp((-contrast - 5) / 25, 0, 1);
   const score = 1.35 * fill + 1.15 * cover + 0.75 * edge
               + 0.90 * Math.min(area / frame, 0.95) - 1.60 * ink;
-  return { score, fill, cover, edge, cont, contrast, areaPct: area / frame };
+  return { score, fill, cover, edge, contrast, areaPct: area / frame };
+}
+
+/** 3x3 상자 흐리기를 times 번 겹쳐 건다(분리형이라 반지름과 무관하게 싸다) */
+function boxBlur3(src, w, h, times) {
+  const n = w * h;
+  let cur = src;
+  const t = new Uint16Array(n);
+  for (let k = 0; k < times; k++) {
+    const out = new Uint8Array(n);
+    for (let y = 0; y < h; y++) {
+      const o = y * w;
+      t[o] = cur[o] * 2 + cur[o + 1];
+      for (let x = 1; x < w - 1; x++) t[o + x] = cur[o + x - 1] + cur[o + x] + cur[o + x + 1];
+      t[o + w - 1] = cur[o + w - 2] + cur[o + w - 1] * 2;
+    }
+    for (let y = 0; y < h; y++) {
+      const up = y > 0 ? -w : 0, dn = y < h - 1 ? w : 0, row = y * w;
+      for (let x = 0; x < w; x++) { const i = row + x; out[i] = (t[i + up] + t[i] + t[i + dn]) / 9; }
+    }
+    cur = out;
+  }
+  return cur === src ? Uint8Array.from(src) : cur;
+}
+
+/** 소벨 경계 강도 */
+function sobelOn(sm, w, h) {
+  const g = new Uint8Array(w * h);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    const gx = -sm[i-w-1] - 2*sm[i-1] - sm[i+w-1] + sm[i-w+1] + 2*sm[i+1] + sm[i+w+1];
+    const gy = -sm[i-w-1] - 2*sm[i-w] - sm[i-w+1] + sm[i+w-1] + 2*sm[i+w] + sm[i+w+1];
+    g[i] = Math.min(255, Math.hypot(gx, gy) / 4);
+  }
+  return g;
 }
 
 /**
@@ -949,33 +975,12 @@ function detectCorners(canvas, srcData) {
     paper[i] = mx * (1 - (mx ? (mx - mn) / mx : 0));   // 밝고 색기 없는 정도
   }
 
-  // 경계를 재기 전에 밝기를 살짝 뭉갠다. 책상 질감이나 노이즈가 만드는
-  // 가짜 경계를 줄여, 흐릿한 종이 가장자리가 묻히지 않게 한다.
-  const sm = new Uint8Array(n);
-  {
-    const t = new Uint16Array(n);
-    for (let y = 0; y < h; y++) {
-      const o = y * w;
-      t[o] = gray[o] * 2 + gray[o + 1];
-      for (let x = 1; x < w - 1; x++) t[o + x] = gray[o + x - 1] + gray[o + x] + gray[o + x + 1];
-      t[o + w - 1] = gray[o + w - 2] + gray[o + w - 1] * 2;
-    }
-    for (let y = 0; y < h; y++) {
-      const up = y > 0 ? -w : 0, dn = y < h - 1 ? w : 0, row = y * w;
-      for (let x = 0; x < w; x++) { const i = row + x; sm[i] = (t[i + up] + t[i] + t[i + dn]) / 9; }
-    }
-  }
-
-  // 경계 강도(소벨) — 후보 채점과 경계 기반 후보 생성에 함께 쓴다
-  const grad = new Uint8Array(n);
+  // 경계 강도(소벨) — 후보 채점과 경계 기반 후보 생성에 함께 쓴다.
+  // 재기 전에 밝기를 뭉갠다. 책상 질감이나 노이즈가 만드는 가짜 경계를 줄여
+  // 흐릿한 종이 가장자리가 묻히지 않게 한다.
+  const grad = sobelOn(boxBlur3(gray, w, h, 1), w, h);
   let gradSum = 0;
-  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
-    const i = y * w + x;
-    const gx = -sm[i-w-1] - 2*sm[i-1] - sm[i+w-1] + sm[i-w+1] + 2*sm[i+1] + sm[i+w+1];
-    const gy = -sm[i-w-1] - 2*sm[i-w] - sm[i-w+1] + sm[i+w-1] + 2*sm[i+w] + sm[i+w+1];
-    const m = Math.min(255, Math.hypot(gx, gy) / 4);
-    grad[i] = m; gradSum += m;
-  }
+  for (let i = 0; i < n; i++) gradSum += grad[i];
   const gradMean = gradSum / n;
 
   const levels = ch => {
@@ -988,10 +993,10 @@ function detectCorners(canvas, srcData) {
   };
 
   const closeR = Math.max(1, Math.round(Math.min(w, h) / 110));
-  let best = null, bestScore = -Infinity, bestRatio = 0, bestInfo = null;
+  let best = null, bestScore = -Infinity, bestInfo = null;
 
   // 후보 마스크 하나를 사각형으로 바꿔 점수를 매긴다(밝기 기반과 경계 기반이 공유)
-  const consider = (mask, minCont = 0) => {
+  const consider = (mask, maxEdge = Infinity) => {
     const { lab, bestLab, bestSize } = largestBlob(mask, w, h);
     if (!bestLab) return;
     const ratio = bestSize / n;
@@ -1007,10 +1012,25 @@ function detectCorners(canvas, srcData) {
 
     const sc = scoreQuad(quad, mask, grad, gray, w, h, bestSize, gradMean);
     if (!sc) return;
-    if (sc.cont < minCont) return;
+    // 경계 기반 경로 전용: 변이 진한 경계 위에 놓인 후보는 여기 것이 아니다.
+    // 이 경로는 "밝기로는 안 보이는 흐린 종이 테두리"를 찾으려고 있다. 진한
+    // 경계를 따라 만들어진 사각형은 십중팔구 글씨 덩어리의 외곽이고, 진짜
+    // 종이였다면 앞의 밝기 기반 경로가 이미 찾았다.
+    // (실측: 글씨 덩어리 edge 1.00 / 흰 종이의 흐린 테두리 0.22~0.54)
+    if (sc.edge >= maxEdge) return;
+    // 종이가 아닌 게 확실한 후보는 여기서 버린다. 끝에 가서 버리면 늦다 —
+    // 그때까지 "제일 좋은 후보" 자리를 차지하고 앉아, 뒤에 올 다른 방식들이
+    // "이미 괜찮은 답이 있다"고 판단해 아예 돌지 않는다.
+    // (실측: 화면 99%를 덮는 쓰레기 후보가 3.0점을 받아 2·3차를 막고 있었다)
+    if (sc.areaPct > 0.93) return;                          // 화면을 거의 다 덮음
+    if (sc.edge < 0.10 && Math.abs(sc.contrast) < 3) return; // 경계도 단차도 없음
+    // 변 안쪽이 바깥쪽보다 한참 어두우면, 종이 테두리가 아니라 잉크 한가운데에
+    // 선을 그은 것이다. 종이 가장자리는 안쪽이 여백(밝음)이라 이렇게 될 수 없다.
+    // (실측: 진짜 종이 -4~+203 / 글씨 한가운데를 두른 사각형 -110)
+    if (sc.contrast < -40) return;
     if (detectCorners.debug) detectCorners.all.push({ ...sc, quad: quad.map(p => [p[0] / s, p[1] / s]) });
     if (sc.score > bestScore) {
-      bestScore = sc.score; best = quad; bestRatio = sc.areaPct; bestInfo = sc;
+      bestScore = sc.score; best = quad; bestInfo = sc;
     }
   };
 
@@ -1052,33 +1072,36 @@ function detectCorners(canvas, srcData) {
   // 비용이 큰 경로라, 밝기 기반이 이미 확실한 답을 낸 경우에는 건너뛴다.
   // 종이와 책상 밝기가 뚜렷이 다르면(단차 25 이상) 1차 결과를 믿어도 된다.
   if (!best || bestInfo.edge < 0.9 || bestInfo.contrast < 25) {
-    const hist = new Uint32Array(256);
-    for (let i = 0; i < n; i++) hist[grad[i]]++;
-    const pct = q => { let a = 0; for (let i = 0; i < 256; i++) { a += hist[i]; if (a >= n * q) return i; } return 255; };
     // 분위수만 쓰면 평평한 장면에서 문턱이 너무 높아져 흐린 가장자리를 놓치므로
     // 낮은 고정값도 함께 시도한다. 선을 잇는 반지름(closeR*3)은 넉넉히 준다.
     // 종이와 책상 밝기가 거의 같으면 가장자리 신호가 변마다 끊겨서,
     // 좁게 이으면 테두리가 닫히지 않는다.
     //
-    // 이 경로만 테두리 이어짐(cont)을 요구한다. 경계선을 닫아 만든 영역은
-    // 종이가 없을 때 글씨 덩어리를 종이로 착각하기 쉬운데, 글씨 덩어리의
-    // 외곽은 줄과 줄 사이가 비어 이어지지 않는다(실측: 종이 0.88~1.00 /
-    // 글씨 덩어리 0.77~0.78). 밝기 기반 경로는 원래 이 오검출을 내지 않으므로
-    // 건드리지 않는다. 걸러져서 아무 후보도 안 남으면 원본을 그대로 쓴다.
-    const seen = [];
-    for (const t0 of [2, 3, 5, pct(0.80), pct(0.90), pct(0.96)]) {
-      const t = Math.max(2, t0 | 0);
-      if (seen.includes(t)) continue;
-      seen.push(t);
-      consider(enclosedByEdges(grad, w, h, t, closeR * 3), 0.83);
-    }
+    // 이 경로만 "변이 진한 경계 위에 있으면 안 된다"는 조건을 건다(consider 참고).
+    // 걸러져서 아무 후보도 안 남으면 자르지 않고 원본을 그대로 쓴다.
+    const tryEdges = (g) => {
+      const hist2 = new Uint32Array(256);
+      for (let i = 0; i < n; i++) hist2[g[i]]++;
+      const q = p => { let a = 0; for (let i = 0; i < 256; i++) { a += hist2[i]; if (a >= n * p) return i; } return 255; };
+      const seen = [];
+      for (const t0 of [2, 3, 5, q(0.80), q(0.90), q(0.96)]) {
+        const t = Math.max(2, t0 | 0);
+        if (seen.includes(t)) continue;
+        seen.push(t);
+        consider(enclosedByEdges(g, w, h, t, closeR * 3), 0.85);
+      }
+    };
+    tryEdges(grad);
+
+    // 결이 있는 책상(나뭇결·천·광택 얼룩)에서는 위가 통하지 않는다. 문턱을 낮추면
+    // 책상 전체가 선으로 막혀 물이 못 들어가고, 높이면 흐린 종이 테두리가 끊긴다.
+    // 노이즈는 세게 뭉개면 사라지지만 종이 그림자는 몇 픽셀 폭이라 살아남는다.
+    // 그래서 한 번 더, 이번에는 크게 뭉갠 그림으로 같은 일을 한다.
+    tryEdges(sobelOn(boxBlur3(gray, w, h, 4), w, h));
   }
 
   detectCorners.info = bestInfo;           // 디버깅/측정용
-  if (!best) return null;
-  if (bestRatio > 0.93) return null;       // 화면을 거의 다 덮으면 자를 것이 없다
-  // 경계도 흐릿하고 안팎 밝기 차도 없으면 종이가 아니다 (책상 무늬 등 오검출 방지)
-  if (bestInfo.edge < 0.10 && Math.abs(bestInfo.contrast) < 3) return null;
+  if (!best) return null;                  // 걸러 낼 것은 consider 에서 이미 걸렀다
 
   const coarse = best.map(p => [clamp(p[0], 0, w) / s, clamp(p[1], 0, h) / s]);
   return refineOnSource(canvas, coarse, srcData) || coarse;
@@ -1351,7 +1374,7 @@ const PROC_FNS = [
   clamp, dist, cross3, mkCanvas, canvasToBlob, blobToCanvas,
   otsu, maskIntegral, closeMask, largestBlob, borderPoints, convexHull, simplifyHull,
   maxAreaQuad, fitLine, lineFrom, lineCross, refineQuad, orderCorners, polyArea,
-  scoreQuad, enclosedByEdges, refineOnSource, detectCorners, solve, homography, estimateAspect, warp, boxMean, enhance,
+  scoreQuad, boxBlur3, sobelOn, enclosedByEdges, refineOnSource, detectCorners, solve, homography, estimateAspect, warp, boxMean, enhance,
   processImage
 ];
 
