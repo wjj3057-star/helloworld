@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-label="문제집 스캐너">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4c8dff"/><stop offset="1" stop-color="#2f6fd0"/>
+    </linearGradient>
+  </defs>
+  <rect width="192" height="192" fill="url(#bg)"/>
+  <!-- 살짝 기울어진 종이 한 장: 비뚤게 찍어도 펴 준다는 뜻 -->
+  <g transform="rotate(-8 96 96)">
+    <rect x="56" y="40" width="80" height="112" rx="5" fill="#fff"/>
+    <g fill="#8fa3bb">
+      <rect x="68" y="60" width="56" height="6" rx="3"/>
+      <rect x="68" y="76" width="44" height="6" rx="3"/>
+      <rect x="68" y="92" width="52" height="6" rx="3"/>
+      <rect x="68" y="108" width="36" height="6" rx="3"/>
+    </g>
+    <!-- 빨간펜 채점 표시 -->
+    <path d="M74 124 l12 12 22-26" fill="none" stroke="#ff5f56" stroke-width="7"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

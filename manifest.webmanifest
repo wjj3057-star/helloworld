@@ -1,0 +1,16 @@
+{
+  "name": "문제집 스캐너",
+  "short_name": "문제집스캐너",
+  "description": "푼 문제집을 여러 장 찍어서 PDF 한 개로 만들어 보냅니다.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f1216",
+  "theme_color": "#111417",
+  "lang": "ko",
+  "icons": [
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

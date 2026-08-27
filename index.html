@@ -6,6 +6,8 @@
 <meta name="theme-color" content="#111417">
 <!-- 두 테마를 직접 다루므로 웹뷰가 임의로 색을 뒤집지 않게 한다 -->
 <meta name="color-scheme" content="dark light">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icon.svg" type="image/svg+xml">
 <title>문제집 스캐너 — 여러 장 찍어서 PDF 한 개로</title>
 <style>
 :root{
@@ -145,6 +147,24 @@ footer button:active{transform:scale(.98)}
 #cropHost img{display:block; max-width:100%; max-height:100%; user-select:none; -webkit-user-drag:none}
 #cropSvg{position:absolute; inset:0; width:100%; height:100%; overflow:visible}
 #cropSvg polygon{fill:rgba(76,141,255,.18); stroke:#4c8dff; stroke-width:2; vector-effect:non-scaling-stroke}
+#cropSvg polygon.bad{fill:rgba(255,95,86,.20); stroke:var(--danger)}
+#edWarn{
+  position:absolute; left:50%; transform:translateX(-50%); bottom:12px;
+  background:var(--danger); color:#fff; padding:8px 14px; border-radius:999px;
+  font-size:13px; font-weight:600; z-index:3; pointer-events:none;
+}
+#loupe{
+  position:absolute; top:12px; left:12px; width:104px; height:104px; border-radius:50%;
+  border:2px solid rgba(255,255,255,.9); box-shadow:0 4px 16px rgba(0,0,0,.5);
+  background-repeat:no-repeat; background-color:#000; z-index:4; pointer-events:none;
+}
+#loupe.right{left:auto; right:12px}
+/* 한가운데 십자선 — 어디를 맞추는 중인지 보이게 */
+#loupe::before,#loupe::after{
+  content:""; position:absolute; background:rgba(255,64,64,.9);
+}
+#loupe::before{left:50%; top:38%; width:1.5px; height:24%; transform:translateX(-50%)}
+#loupe::after{top:50%; left:38%; height:1.5px; width:24%; transform:translateY(-50%)}
 .handle{
   position:absolute; width:34px;height:34px; margin:-17px 0 0 -17px;
   border-radius:50%; background:rgba(76,141,255,.28); border:2px solid #fff;
@@ -188,6 +208,18 @@ footer button:active{transform:scale(.98)}
 #cam .done{
   background:transparent;border:1px solid rgba(255,255,255,.45);color:#fff;
   padding:10px 16px;border-radius:10px;cursor:pointer;min-width:70px;font-weight:600;
+}
+/* 누른 곳에 초점을 맞췄다는 표시 */
+.focusring{
+  position:absolute; width:68px; height:68px; margin:-34px 0 0 -34px;
+  border:2px solid #ffd400; border-radius:50%; opacity:0;
+  pointer-events:none; z-index:3;
+}
+.focusring.on{animation:focuspop .7s ease-out}
+@keyframes focuspop{
+  0%{opacity:1; transform:scale(1.4)}
+  60%{opacity:1; transform:scale(1)}
+  100%{opacity:0; transform:scale(1)}
 }
 .flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .18s}
 .flash.on{opacity:.85;transition:none}
@@ -248,6 +280,7 @@ footer button:active{transform:scale(.98)}
     <button class="torch" id="camTorch" hidden aria-pressed="false">🔦 조명</button>
   </div>
   <video id="video" playsinline muted autoplay></video>
+  <div class="focusring" id="focusRing"></div>
   <div class="cambottom">
     <span class="camcount" id="camCount">0장</span>
     <button id="shutter" aria-label="촬영"></button>
@@ -268,6 +301,8 @@ footer button:active{transform:scale(.98)}
     <div id="cropHost">
       <img id="cropImg" alt="">
       <svg id="cropSvg"><polygon id="cropPoly" points=""></polygon></svg>
+      <div id="loupe" hidden></div>
+      <div id="edWarn" hidden>모서리가 꼬였어요</div>
     </div>
   </div>
   <div class="bottom">
@@ -1961,6 +1996,34 @@ function layoutCrop() {
   drawCrop();
 }
 
+/**
+ * 네 점이 "꼬이지 않은" 사각형인가.
+ *
+ * 손으로 모서리를 끌다 이웃 모서리를 지나치면 변이 서로 교차해 나비넥타이가 된다.
+ * 그대로 펴면 결과가 통째로 뭉개진다(실측: 진한 화소 15% → 66%).
+ * 세 점씩 묶은 외적의 부호가 네 번 다 같아야 볼록한 사각형이다.
+ */
+function isConvexQuad(q) {
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) % 4], c = q[(i + 2) % 4];
+    const cr = (b[0]-a[0]) * (c[1]-b[1]) - (b[1]-a[1]) * (c[0]-b[0]);
+    if (Math.abs(cr) < 1e-9) continue;                 // 세 점이 일직선
+    const s = cr > 0 ? 1 : -1;
+    if (!sign) sign = s;
+    else if (s !== sign) return false;
+  }
+  return sign !== 0;
+}
+
+/** 펴도 되는 사각형인가 — 꼬이지 않았고 너무 납작하지도 않은가 */
+function usableQuad(q, w, h) {
+  if (!q || q.length !== 4) return false;
+  if (!q.every(p => isFinite(p[0]) && isFinite(p[1]))) return false;
+  if (!isConvexQuad(q)) return false;
+  return Math.abs(polyArea(q)) > w * h * 0.01;         // 화면의 1% 미만이면 쓸 수 없다
+}
+
 function drawCrop() {
   const host = $("#cropHost");
   // 손잡이는 한 번만 만들고 이후에는 위치만 옮긴다
@@ -1977,15 +2040,41 @@ function drawCrop() {
     });
   }
   const pts = ed.corners.map(c => [c[0] * ed.scale, c[1] * ed.scale]);
-  $("#cropPoly").setAttribute("points", pts.map(p => p.join(",")).join(" "));
+  const poly = $("#cropPoly");
+  poly.setAttribute("points", pts.map(p => p.join(",")).join(" "));
+  // 꼬인 사각형은 바로 보이게 표시한다. 적용도 막는다.
+  const bad = !usableQuad(ed.corners, ed.src.width, ed.src.height);
+  poly.classList.toggle("bad", bad);
+  $("#edWarn").hidden = !bad;
   pts.forEach((p, i) => {
     handles[i].style.left = p[0] + "px";
     handles[i].style.top = p[1] + "px";
   });
 }
 
+/**
+ * 돋보기 — 끌고 있는 모서리를 확대해 보여 준다.
+ * 손가락이 정작 맞춰야 할 지점을 가리기 때문이다.
+ * 손가락 반대쪽 위 구석에 띄워 가리지 않게 한다.
+ */
+function showLoupe(i) {
+  const el = $("#loupe");
+  if (!ed.imgUrl || !ed.src) { el.hidden = true; return; }
+  const Z = 3, R = 52;                       // 배율, 반지름
+  const iw = ed.src.width * ed.scale, ih = ed.src.height * ed.scale;
+  const x = ed.corners[i][0] * ed.scale, y = ed.corners[i][1] * ed.scale;
+  el.style.backgroundImage = `url("${ed.imgUrl}")`;
+  el.style.backgroundSize = `${iw * Z}px ${ih * Z}px`;
+  el.style.backgroundPosition = `${R - x * Z}px ${R - y * Z}px`;
+  // 끄는 손이 왼쪽 위에 있으면 오른쪽 위로 피한다
+  el.classList.toggle("right", x < iw / 2);
+  el.hidden = false;
+}
+function hideLoupe() { $("#loupe").hidden = true; }
+
 function startDrag(e, i) {
   e.preventDefault();
+  showLoupe(i);
   const host = $("#cropHost");
 
   // 끄는 동안 편집 화면은 고정이라 자리가 바뀌지 않는다. 한 번만 잰다.
@@ -2004,10 +2093,12 @@ function startDrag(e, i) {
     ed.corners[i] = [x, y];
     ed.curve = null;          // 손으로 맞춘 사각형은 곧은 것으로 본다
     drawCrop();
+    showLoupe(i);
   };
   const move = ev => { last = ev; if (!raf) raf = requestAnimationFrame(draw); };
   const up = () => {
     if (raf) { cancelAnimationFrame(raf); draw(); }   // 마지막 위치를 빠뜨리지 않는다
+    hideLoupe();
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
     window.removeEventListener("resize", remeasure);
@@ -2179,7 +2270,16 @@ async function deliver(files) {
   if (window.AndroidBridge && AndroidBridge.beginShare) {
     try {
       AndroidBridge.beginShare();
-      for (const f of files) AndroidBridge.addFile(f.name, await blobToBase64(f));
+      // 통째로 base64 로 바꾸면 30장짜리(10MB)가 13MB 문자열이 되어 한 번에
+      // 메모리에 올라간다. 1MB 씩 잘라 보내면 언제나 그만큼만 쓴다.
+      const CHUNK = 1024 * 1024;
+      for (const f of files) {
+        AndroidBridge.startFile(f.name);
+        for (let off = 0; off < f.size; off += CHUNK) {
+          AndroidBridge.appendFile(await blobToBase64(f.slice(off, off + CHUNK)));
+        }
+        AndroidBridge.endFile();
+      }
       AndroidBridge.endShare();
       toast(`공유 앱을 선택하세요 (${files.length}개, ${mb}MB)`);
       return;
@@ -2278,6 +2378,43 @@ function setupTorch(track) {
   try { caps = track.getCapabilities(); } catch (e) { return; }
   if (!caps || !caps.torch) return;
   btn.hidden = false;
+}
+
+/**
+ * 화면을 누른 곳에 초점 맞추기.
+ *
+ * 연속 초점만으로는 종이 대신 책상이나 손에 초점이 가는 일이 있다.
+ * 미리보기는 object-fit:cover 라 화면과 영상의 비율이 달라 잘려 있으므로,
+ * 그 잘린 만큼을 되돌려야 누른 자리가 영상의 어디인지 알 수 있다.
+ */
+async function tapFocus(ev) {
+  const track = cam.stream && cam.stream.getVideoTracks()[0];
+  if (!track || !track.getCapabilities) return;
+  let caps;
+  try { caps = track.getCapabilities(); } catch (e) { return; }
+  if (!caps || !caps.pointsOfInterest) return;
+
+  const v = $("#video");
+  const r = v.getBoundingClientRect();
+  if (!r.width || !r.height || !v.videoWidth) return;
+  // cover: 영상이 화면보다 큰 쪽이 잘린다
+  const scale = Math.max(r.width / v.videoWidth, r.height / v.videoHeight);
+  const shownW = v.videoWidth * scale, shownH = v.videoHeight * scale;
+  const x = (ev.clientX - r.left + (shownW - r.width) / 2) / shownW;
+  const y = (ev.clientY - r.top + (shownH - r.height) / 2) / shownH;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return;
+
+  try {
+    await track.applyConstraints({ advanced: [{ pointsOfInterest: [{ x, y }] }] });
+    const ring = $("#focusRing");
+    ring.style.left = (ev.clientX - r.left) + "px";
+    ring.style.top = (ev.clientY - r.top) + "px";
+    ring.classList.remove("on");
+    void ring.offsetWidth;                    // 애니메이션 다시 시작
+    ring.classList.add("on");
+  } catch (e) {
+    // 지원한다고 해 놓고 거절하는 기기가 있다. 조용히 넘어간다.
+  }
 }
 
 async function toggleTorch() {
@@ -2461,9 +2598,10 @@ $("#fileShot").onchange = e => { addFiles(e.target.files); e.target.value = ""; 
 
 $("#shutter").onclick = shoot;
 $("#camTorch").onclick = toggleTorch;
+$("#video").onclick = tapFocus;
 $("#camDone").onclick = () => { closeCam(); if (state.pages.length) toast("순서를 확인하고 PDF를 만드세요"); };
 
-$("#edClose").onclick = closeEditor;
+$("#edClose").onclick = () => { hideLoupe(); closeEditor(); };
 $("#edFull").onclick = () => {
   ed.corners = [[0, 0], [ed.src.width, 0], [ed.src.width, ed.src.height], [0, ed.src.height]];
   ed.curve = null;
@@ -2486,10 +2624,15 @@ $("#edApply").onclick = async () => {
   const box = [[0, 0], [ed.src.width, 0], [ed.src.width, ed.src.height], [0, ed.src.height]];
   const full = ed.corners.every((c, i) =>
     Math.abs(c[0] - box[i][0]) < 0.5 && Math.abs(c[1] - box[i][1]) < 0.5);
+  if (!full && !usableQuad(ed.corners, ed.src.width, ed.src.height)) {
+    toast("모서리가 서로 꼬여 있어요. 네 점이 사각형이 되게 맞춰 주세요");
+    return;
+  }
   p.corners = full ? null : ed.corners.map(c => c.slice());
   p.curve = full ? null : (ed.curve || null);
   p.filter = ed.filter;
   p.rot = ed.rot;
+  hideLoupe();
   closeEditor();
   await reprocess(p);
 };
@@ -2532,6 +2675,14 @@ window.__handleBack = () => {
 window.addEventListener("beforeunload", e => {
   if (state.pages.length) { e.preventDefault(); e.returnValue = ""; }
 });
+
+/* 오프라인 지원 — 망이 없어도 열리게 한다.
+   앱(APK)은 파일을 안에 담고 있어 원래 오프라인이므로 등록하지 않는다. */
+if ("serviceWorker" in navigator && !window.AndroidBridge && location.protocol !== "file:") {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});   // 실패해도 앱은 그대로 돈다
+  });
+}
 
 /* ============================================================== 시작 */
 (async function init() {

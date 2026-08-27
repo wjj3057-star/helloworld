@@ -50,6 +50,8 @@ public class MainActivity extends Activity {
     private ValueCallback<Uri[]> fileCallback;
     private PermissionRequest pendingCamera;
     private final ArrayList<Uri> staged = new ArrayList<>();
+    private FileOutputStream curOut;      // 조각내어 받는 중인 파일
+    private File curFile;
 
     @Override
     protected void onCreate(Bundle saved) {
@@ -206,23 +208,62 @@ public class MainActivity extends Activity {
             if (old != null) for (File f : old) f.delete();
         }
 
-        /** 파일 하나씩 받는다(한 번에 큰 문자열을 넘기지 않으려고 나눠서 받음) */
+        /**
+         * 파일 하나를 조각내어 받는다.
+         *
+         * 예전에는 파일 전체를 base64 문자열 하나로 받았다. 30장짜리 PDF(10MB)가
+         * 13MB 문자열이 되어 웹 쪽과 앱 쪽 양쪽 메모리에 통째로 올라갔다.
+         * 지금은 1MB 씩 받아 곧바로 디스크에 흘려 쓴다.
+         */
         @JavascriptInterface
-        public void addFile(String name, String base64) {
+        public void startFile(String name) {
+            closeCurrent();
             try {
-                byte[] bytes = Base64.decode(base64, Base64.DEFAULT);
                 File dir = new File(getCacheDir(), "share");
                 if (!dir.exists() && !dir.mkdirs()) throw new Exception("폴더 생성 실패");
-                File f = new File(dir, name.replaceAll("[/\\\\]", "_"));
-                try (FileOutputStream out = new FileOutputStream(f)) {
-                    out.write(bytes);
-                }
-                staged.add(FileProvider.getUriForFile(
-                        MainActivity.this, getPackageName() + ".fileprovider", f));
+                curFile = new File(dir, name.replaceAll("[/\\\\]", "_"));
+                curOut = new FileOutputStream(curFile);
             } catch (Exception e) {
-                runOnUiThread(() -> Toast.makeText(MainActivity.this,
-                        "PDF 저장 실패: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                curFile = null; curOut = null;
+                shareError(e);
             }
+        }
+
+        @JavascriptInterface
+        public void appendFile(String base64) {
+            if (curOut == null) return;
+            try {
+                curOut.write(Base64.decode(base64, Base64.DEFAULT));
+            } catch (Exception e) {
+                closeCurrent();
+                curFile = null;
+                shareError(e);
+            }
+        }
+
+        @JavascriptInterface
+        public void endFile() {
+            if (curOut == null || curFile == null) { closeCurrent(); return; }
+            closeCurrent();
+            try {
+                staged.add(FileProvider.getUriForFile(
+                        MainActivity.this, getPackageName() + ".fileprovider", curFile));
+            } catch (Exception e) {
+                shareError(e);
+            }
+            curFile = null;
+        }
+
+        private void closeCurrent() {
+            if (curOut != null) {
+                try { curOut.close(); } catch (Exception ignored) {}
+                curOut = null;
+            }
+        }
+
+        private void shareError(Exception e) {
+            runOnUiThread(() -> Toast.makeText(MainActivity.this,
+                    "PDF 저장 실패: " + e.getMessage(), Toast.LENGTH_LONG).show());
         }
 
         @JavascriptInterface
