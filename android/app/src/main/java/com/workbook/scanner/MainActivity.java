@@ -2,6 +2,7 @@ package com.workbook.scanner;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ClipData;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
@@ -9,6 +10,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.util.Base64;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
@@ -22,7 +24,9 @@ import android.widget.Toast;
 import android.window.OnBackInvokedDispatcher;
 
 import androidx.core.content.FileProvider;
+import androidx.webkit.WebSettingsCompat;
 import androidx.webkit.WebViewAssetLoader;
+import androidx.webkit.WebViewFeature;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -56,10 +60,21 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(web);
 
+        // 종이를 맞추는 동안 손을 안 대면 화면이 꺼진다. 앱이 떠 있는 동안은 켜 둔다.
+        // (웹 쪽 Wake Lock 이 거절되는 기기가 있어 앱에서도 걸어 둔다)
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);                    // IndexedDB(작업 자동 저장)
         s.setMediaPlaybackRequiresUserGesture(false);    // 카메라 미리보기 자동 재생
+
+        // 시스템이 어두운 모드일 때 웹뷰가 색을 임의로 뒤집지 않게 한다.
+        // 이 페이지는 밝은 화면·어두운 화면을 스스로 다루므로(color-scheme 선언),
+        // 웹뷰까지 손대면 스캔 결과나 버튼 색이 이상해진다.
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+            WebSettingsCompat.setAlgorithmicDarkeningAllowed(s, false);
+        }
 
         final WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
                 .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
@@ -227,6 +242,15 @@ public class MainActivity extends Activity {
                 }
                 i.setType("application/pdf");
                 i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+                // 받는 앱에 읽기 권한이 실제로 넘어가려면 ClipData 에도 URI 가 있어야 한다.
+                // EXTRA_STREAM 만 넣으면 카톡·메일 같은 앱에서 "파일을 열 수 없음"이 난다.
+                ClipData clip = ClipData.newUri(getContentResolver(), "PDF", list.get(0));
+                for (int k = 1; k < list.size(); k++) {
+                    clip.addItem(new ClipData.Item(list.get(k)));
+                }
+                i.setClipData(clip);
+
                 startActivity(Intent.createChooser(i, "PDF 보내기"));
             });
         }

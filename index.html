@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#111417">
+<!-- 두 테마를 직접 다루므로 웹뷰가 임의로 색을 뒤집지 않게 한다 -->
+<meta name="color-scheme" content="dark light">
 <title>문제집 스캐너 — 여러 장 찍어서 PDF 한 개로</title>
 <style>
 :root{
@@ -167,6 +169,12 @@ footer button:active{transform:scale(.98)}
   display:flex;align-items:center;gap:10px;
 }
 #cam video{flex:1; width:100%; object-fit:cover; background:#000; min-height:0}
+#cam .camtop .torch{
+  margin-left:auto; background:transparent; border:1px solid rgba(255,255,255,.45);
+  color:#fff; padding:7px 12px; border-radius:999px; cursor:pointer; font-size:13px;
+  white-space:nowrap;
+}
+#cam .camtop .torch[aria-pressed="true"]{background:#fff; color:#000; border-color:#fff}
 #cam .cambottom{
   background:#000; color:#fff; padding:14px 20px calc(env(safe-area-inset-bottom) + 18px);
   display:flex; align-items:center; justify-content:space-between; gap:16px;
@@ -237,6 +245,7 @@ footer button:active{transform:scale(.98)}
 <div class="overlay" id="cam" style="background:#000">
   <div class="camtop">
     <span id="camHint">종이 전체가 화면에 들어오게 찍으세요</span>
+    <button class="torch" id="camTorch" hidden aria-pressed="false">🔦 조명</button>
   </div>
   <video id="video" playsinline muted autoplay></video>
   <div class="cambottom">
@@ -2200,7 +2209,7 @@ async function deliver(files) {
 }
 
 /* ========================================================= 연속 촬영 */
-const cam = { stream: null, count: 0 };
+const cam = { stream: null, count: 0, torch: false };
 
 async function openCam() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -2237,7 +2246,10 @@ async function startStream() {
     video: {
       facingMode: { ideal: "environment" },
       width: { ideal: 1500 }, height: { ideal: 2000 },
-      frameRate: { ideal: 30 }
+      frameRate: { ideal: 30 },
+      // 가까이 대고 찍으면 고정 초점으로는 작은 수식·한자가 뭉개진다.
+      // advanced 는 "되면 해 달라"는 뜻이라 지원하지 않는 기기에서도 안전하다.
+      advanced: [{ focusMode: "continuous" }]
     },
     audio: false
   });
@@ -2249,6 +2261,57 @@ async function startStream() {
   // 프레임 잡기를 워커로 넘긴다. 안 되는 환경이면 셔터에서 직접 잡는다.
   const track = cam.stream.getVideoTracks()[0];
   if (track) startGrabber(track);
+  setupTorch(track);
+  keepAwake(true);
+}
+
+/* ---- 손전등 --------------------------------------------------------
+   스탠드 불빛을 등지고 찍으면 폰 그림자가 종이에 그대로 드리운다.
+   기기가 지원할 때만 버튼을 띄운다(대부분의 노트북 카메라는 없다). */
+function setupTorch(track) {
+  const btn = $("#camTorch");
+  btn.hidden = true;
+  btn.setAttribute("aria-pressed", "false");
+  cam.torch = false;
+  if (!track || !track.getCapabilities) return;
+  let caps;
+  try { caps = track.getCapabilities(); } catch (e) { return; }
+  if (!caps || !caps.torch) return;
+  btn.hidden = false;
+}
+
+async function toggleTorch() {
+  const track = cam.stream && cam.stream.getVideoTracks()[0];
+  if (!track) return;
+  const on = !cam.torch;
+  try {
+    await track.applyConstraints({ advanced: [{ torch: on }] });
+    cam.torch = on;
+    $("#camTorch").setAttribute("aria-pressed", on ? "true" : "false");
+  } catch (e) {
+    console.warn("손전등을 켜지 못했습니다:", e);
+    toast("이 기기에서는 조명을 쓸 수 없어요");
+    $("#camTorch").hidden = true;
+  }
+}
+
+/* ---- 화면 꺼짐 방지 --------------------------------------------------
+   종이를 맞추는 동안 손을 안 대면 1분도 안 돼 화면이 꺼진다.
+   촬영·편집 중에만 잡고, 끝나면 바로 놓아 준다. */
+let wakeLock = null;
+async function keepAwake(on) {
+  if (!on) {
+    if (wakeLock) { try { await wakeLock.release(); } catch (e) {} wakeLock = null; }
+    return;
+  }
+  if (wakeLock || !navigator.wakeLock) return;
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    // 화면이 가려졌다 돌아오면 잠금이 풀려 있으므로 다시 잡는다
+    wakeLock.addEventListener("release", () => { wakeLock = null; });
+  } catch (e) {
+    wakeLock = null;                      // 배터리 절약 모드 등에서는 거절될 수 있다
+  }
 }
 
 /** 카메라 하드웨어를 놓아 준다(촬영 화면은 그대로 둘 수 있다) */
@@ -2256,6 +2319,9 @@ function stopStream() {
   stopGrabber();
   if (cam.stream) { cam.stream.getTracks().forEach(t => t.stop()); cam.stream = null; }
   $("#video").srcObject = null;
+  cam.torch = false;
+  $("#camTorch").hidden = true;
+  $("#camTorch").setAttribute("aria-pressed", "false");
 }
 
 function closeCam() {
@@ -2263,6 +2329,7 @@ function closeCam() {
   setPoolLimit(POOL_SIZE);        // 촬영이 끝났으니 남은 큐를 전력으로 처리
   drainShots();
   stopStream();
+  keepAwake(false);
 }
 
 /**
@@ -2275,7 +2342,8 @@ function closeCam() {
 let camResuming = false;
 async function setCamActive(active) {
   if (!$("#cam").classList.contains("on")) return;
-  if (!active) { stopStream(); return; }
+  if (!active) { stopStream(); keepAwake(false); return; }
+  keepAwake(true);
   if (cam.stream || camResuming) return;
   camResuming = true;
   try { await startStream(); }
@@ -2392,6 +2460,7 @@ $("#filePick").onchange = e => { addFiles(e.target.files); e.target.value = ""; 
 $("#fileShot").onchange = e => { addFiles(e.target.files); e.target.value = ""; };
 
 $("#shutter").onclick = shoot;
+$("#camTorch").onclick = toggleTorch;
 $("#camDone").onclick = () => { closeCam(); if (state.pages.length) toast("순서를 확인하고 PDF를 만드세요"); };
 
 $("#edClose").onclick = closeEditor;
