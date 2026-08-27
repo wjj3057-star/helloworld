@@ -388,7 +388,7 @@ const DB = (() => {
   return {
     savePage: (p, order) => tx("pages", "readwrite", s => s.put({
       id: p.id, order, srcBlob: p.srcBlob, outBlob: p.outBlob,
-      corners: p.corners, rot: p.rot, filter: p.filter
+      corners: p.corners, curve: p.curve || null, rot: p.rot, filter: p.filter
     })),
     delPage: id => tx("pages", "readwrite", s => s.delete(id)),
     clearPages: () => tx("pages", "readwrite", s => s.clear()),
@@ -870,6 +870,20 @@ function enclosedByEdges(grad, w, h, thr, closeR) {
 }
 
 /**
+ * 점들에 2차식 y = c0 + c1·x + c2·x² 을 최소제곱으로 맞춘다.
+ * 변이 직선에서 얼마나 벗어나는지(=휜 정도)를 나타내는 데 쓴다.
+ */
+function fitQuad(xs, ys) {
+  let s0 = xs.length, s1 = 0, s2 = 0, s3 = 0, s4 = 0, t0 = 0, t1 = 0, t2 = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const x = xs[i], y = ys[i], x2 = x * x;
+    s1 += x; s2 += x2; s3 += x2 * x; s4 += x2 * x2;
+    t0 += y; t1 += x * y; t2 += x2 * y;
+  }
+  return solve([[s0, s1, s2], [s1, s2, s3], [s2, s3, s4]], [t0, t1, t2], 3);
+}
+
+/**
  * 대충 잡은 사각형을 원본 해상도에서 다시 맞춘다.
  *
  * 감지는 420px 로 줄여서 하므로, 거기서 생긴 1px 오차가 원본에서는
@@ -894,7 +908,7 @@ function refineOnSource(canvas, quad, srcData) {
     return (im[i] * 299 + im[i + 1] * 587 + im[i + 2] * 114) / 1000;
   };
 
-  const lines = [];
+  const lines = [], edgePts = [];
   for (let e = 0; e < 4; e++) {
     const a = quad[e], b = quad[(e + 1) % 4];
     const len = dist(a, b);
@@ -936,6 +950,7 @@ function refineOnSource(canvas, quad, srcData) {
     const keep = pts.filter((q, i) => resid[i] <= Math.max(1.5, med * 2.5));
     if (keep.length >= 12) L = fitLine(keep);
     lines.push(L);
+    edgePts.push(keep.length >= 12 ? keep : pts);
   }
 
   const out = [];
@@ -946,7 +961,61 @@ function refineOnSource(canvas, quad, srcData) {
     if (dist(p, quad[i]) > limit) return null;   // 너무 멀리 튀면 믿지 않는다
     out.push(p);
   }
-  return out;
+  return { corners: out, curve: measureCurve(out, edgePts) };
+}
+
+/**
+ * 네 변이 직선에서 얼마나 벗어나는지 재서 "휨"으로 돌려준다.
+ *
+ * 두꺼운 문제집을 펼치면 접지선 쪽이 들리면서 종이가 원기둥처럼 휜다.
+ * 꼭짓점 네 개만 쓰는 원근 보정으로는 이걸 펼 수 없다 — 변 자체가 곡선이라
+ * 결과물의 위아래가 활처럼 휘고 모서리에 책상이 삐져 들어온다.
+ *
+ * 경계점들을 "펴진 직사각형 좌표"로 옮겨 놓으면, 평평한 종이는 변이 0 또는 1
+ * 에 딱 붙고 휜 종이는 그만큼 벗어난다. 그 벗어남을 변마다 2차식으로 맞춰 둔다.
+ * warp 가 이 값만큼 표본 위치를 되밀어 편다.
+ *
+ * @returns {{top:number[],right:number[],bottom:number[],left:number[],max:number}|null}
+ */
+function measureCurve(corners, edgePts) {
+  // 원본 → 단위 직사각형
+  const hi = homography(corners, [[0, 0], [1, 0], [1, 1], [0, 1]]);
+  if (!hi) return null;
+  const toRect = (p) => {
+    const den = hi[6] * p[0] + hi[7] * p[1] + 1;
+    if (!den) return null;
+    return [(hi[0] * p[0] + hi[1] * p[1] + hi[2]) / den,
+            (hi[3] * p[0] + hi[4] * p[1] + hi[5]) / den];
+  };
+
+  // 변마다 (진행 방향 좌표, 직선에서 벗어난 정도)
+  //   0=위(v가 0이어야), 1=오른쪽(u가 1), 2=아래(v가 1), 3=왼쪽(u가 0)
+  const AXIS = [1, 0, 1, 0];        // 벗어남을 재는 축 (1=v, 0=u)
+  const BASE = [0, 1, 1, 0];        // 평평하면 나와야 하는 값
+  const fits = [];
+  let max = 0;
+  for (let e = 0; e < 4; e++) {
+    const xs = [], ys = [];
+    for (const p of edgePts[e]) {
+      const r = toRect(p);
+      if (!r) continue;
+      const along = r[1 - AXIS[e]], dev = r[AXIS[e]] - BASE[e];
+      if (along < -0.2 || along > 1.2 || Math.abs(dev) > 0.25) continue;  // 튄 점
+      xs.push(along); ys.push(dev);
+    }
+    if (xs.length < 12) return null;
+    const c = fitQuad(xs, ys);
+    if (!c || !isFinite(c[0]) || !isFinite(c[1]) || !isFinite(c[2])) return null;
+    for (let k = 0; k <= 10; k++) {
+      const t = k / 10;
+      max = Math.max(max, Math.abs(c[0] + c[1] * t + c[2] * t * t));
+    }
+    fits.push(c);
+  }
+  // 거의 평평하면 굳이 건드리지 않는다(측정 잡음을 왜곡으로 바꿔 넣지 않도록).
+  // 반대로 너무 크면 경계를 잘못 잡은 것이므로 믿지 않는다.
+  if (max < 0.004 || max > 0.14) return null;
+  return { top: fits[0], right: fits[1], bottom: fits[2], left: fits[3], max };
 }
 
 /**
@@ -962,6 +1031,7 @@ function refineOnSource(canvas, quad, srcData) {
  * @returns {[number,number][]|null} [TL,TR,BR,BL] (canvas 좌표) 또는 null(=자를 필요 없음/실패)
  */
 function detectCorners(canvas, srcData) {
+  detectCorners.curve = null;
   if (detectCorners.debug) detectCorners.all = [];
   const D = 420;
   const s = Math.min(1, D / Math.max(canvas.width, canvas.height));
@@ -1110,7 +1180,9 @@ function detectCorners(canvas, srcData) {
   if (!best) return null;                  // 걸러 낼 것은 consider 에서 이미 걸렀다
 
   const coarse = best.map(p => [clamp(p[0], 0, w) / s, clamp(p[1], 0, h) / s]);
-  return refineOnSource(canvas, coarse, srcData) || coarse;
+  const ref = refineOnSource(canvas, coarse, srcData);
+  detectCorners.curve = ref ? ref.curve : null;   // 휨 정보는 호출부가 바로 받아 간다
+  return ref ? ref.corners : coarse;
 }
 
 /* ================================== 2) 원근 보정(사다리꼴 → 직사각형) */
@@ -1185,7 +1257,8 @@ function estimateAspect(corners, imgW, imgH) {
 }
 
 /** corners 로 잘라 반듯하게 편 ImageData 반환 */
-function warp(srcCanvas, corners, maxOut, srcData) {
+/** @param curve measureCurve 결과(없으면 평면으로 본다) */
+function warp(srcCanvas, corners, maxOut, srcData, curve) {
   const [tl, tr, br, bl] = corners;
   let W = Math.round((dist(tl, tr) + dist(bl, br)) / 2);
   let H = Math.round((dist(tl, bl) + dist(tr, br)) / 2);
@@ -1213,14 +1286,47 @@ function warp(srcCanvas, corners, maxOut, srcData) {
   const od = out.data;
 
   const maxU = sw - 1, maxV = sh - 1, rowBytes = sw * 4;
+
+  // 휨이 있으면 표본 격자를 그만큼 되민다. 변마다 2차식이 하나씩이므로
+  // 열/행별로 미리 계산해 두면 안쪽 반복에서는 곱셈 두 번이면 된다.
+  let curveTop = null, curveBot = null, curveLeft = null, curveRight = null;
+  if (curve) {
+    const ev = (c, t) => c[0] + c[1] * t + c[2] * t * t;
+    curveTop = new Float32Array(W); curveBot = new Float32Array(W);
+    for (let x = 0; x < W; x++) {
+      const u = x / (W - 1 || 1);
+      curveTop[x] = ev(curve.top, u) * H;
+      curveBot[x] = (1 + ev(curve.bottom, u)) * H;
+    }
+    curveLeft = new Float32Array(H); curveRight = new Float32Array(H);
+    for (let y = 0; y < H; y++) {
+      const v = y / (H - 1 || 1);
+      curveLeft[y] = ev(curve.left, v) * W;
+      curveRight[y] = (1 + ev(curve.right, v)) * W;
+    }
+  }
+
   let o = 0;
   for (let y = 0; y < H; y++) {
     // 행 안에서는 y 항이 고정이므로 밖으로 뺀다
     const nu = a1 * y + a2, nv = a4 * y + a5, nd = a7 * y + 1;
+    const fv = H > 1 ? y / (H - 1) : 0;
+    const cl = curve ? curveLeft[y] : 0, cr = curve ? curveRight[y] : W;
     for (let x = 0; x < W; x++, o += 4) {
-      const den = a6 * x + nd;
-      const u = (a0 * x + nu) / den;
-      const v = (a3 * x + nv) / den;
+      let u, v;
+      if (curve) {
+        // 펴진 좌표 → 실제로 종이가 놓인 (휜) 좌표
+        const fu = W > 1 ? x / (W - 1) : 0;
+        const rx = cl + fu * (cr - cl);
+        const ry = curveTop[x] + fv * (curveBot[x] - curveTop[x]);
+        const den = a6 * rx + a7 * ry + 1;
+        u = (a0 * rx + a1 * ry + a2) / den;
+        v = (a3 * rx + a4 * ry + a5) / den;
+      } else {
+        const den = a6 * x + nd;
+        u = (a0 * x + nu) / den;
+        v = (a3 * x + nv) / den;
+      }
       if (u < 0 || v < 0 || u > maxU || v > maxV) {
         od[o] = od[o+1] = od[o+2] = od[o+3] = 255;
         continue;
@@ -1359,10 +1465,13 @@ async function processImage(blob, o) {
   const srcData = src.getContext("2d", { willReadFrequently: true })
                      .getImageData(0, 0, src.width, src.height).data;
 
-  let corners = o.corners;
-  if (corners === undefined) corners = detectCorners(src, srcData);
+  let corners = o.corners, curve = o.curve || null;
+  if (corners === undefined) {
+    corners = detectCorners(src, srcData);
+    curve = detectCorners.curve;          // 방금 잰 휨을 그대로 받아 간다
+  }
 
-  let img = corners ? warp(src, corners, o.outMax, srcData) : null;
+  let img = corners ? warp(src, corners, o.outMax, srcData, curve) : null;
   if (!img) {
     const s = Math.min(1, o.outMax / Math.max(src.width, src.height));
     const w = Math.max(1, Math.round(src.width * s)), h = Math.max(1, Math.round(src.height * s));
@@ -1387,7 +1496,7 @@ async function processImage(blob, o) {
     ctx.drawImage(flat, -flat.width / 2, -flat.height / 2);
   }
 
-  return { srcBlob, outBlob: await canvasToBlob(final, o.quality), corners: corners || null };
+  return { srcBlob, outBlob: await canvasToBlob(final, o.quality), corners: corners || null, curve };
 }
 
 /* ---- 워커: 무거운 처리를 화면 밖으로 -------------------------------
@@ -1398,7 +1507,7 @@ const PROC_FNS = [
   clamp, dist, cross3, mkCanvas, canvasToBlob, blobToCanvas,
   otsu, maskIntegral, closeMask, largestBlob, borderPoints, convexHull, simplifyHull,
   maxAreaQuad, fitLine, lineFrom, lineCross, refineQuad, orderCorners, polyArea,
-  scoreQuad, boxBlur3, sobelOn, enclosedByEdges, refineOnSource, detectCorners, solve, homography, estimateAspect, warp, boxMean, enhance,
+  scoreQuad, boxBlur3, sobelOn, enclosedByEdges, fitQuad, measureCurve, refineOnSource, detectCorners, solve, homography, estimateAspect, warp, boxMean, enhance,
   processImage
 ];
 
@@ -1619,12 +1728,12 @@ async function renderPage(page, first) {
   const input = page.srcBmp || page.srcBlob;
   page.srcBmp = null;
   const r = await runProcess(input, {
-    corners: page.corners, filter: page.filter, rot: page.rot,
+    corners: page.corners, curve: page.curve, filter: page.filter, rot: page.rot,
     srcMax: SRC_MAX, outMax: OUT_MAX, quality: state.settings.quality,
     makeSrc: !!first
   });
   if (r.srcBlob) page.srcBlob = r.srcBlob;
-  if (page.corners === undefined) page.corners = r.corners;
+  if (page.corners === undefined) { page.corners = r.corners; page.curve = r.curve || null; }
   page.outBlob = r.outBlob;
   if (page.url) URL.revokeObjectURL(page.url);
   page.url = URL.createObjectURL(page.outBlob);
@@ -1794,7 +1903,7 @@ function render() {
 }
 
 /* ====================================================== 잘라내기 편집 */
-const ed = { idx: -1, corners: null, src: null, imgUrl: null, scale: 1, filter: "doc", rot: 0 };
+const ed = { idx: -1, corners: null, curve: null, src: null, imgUrl: null, scale: 1, filter: "doc", rot: 0 };
 
 async function openEditor(idx) {
   const p = state.pages[idx];
@@ -1818,6 +1927,7 @@ async function openEditor(idx) {
     ed.corners = p.corners
       ? p.corners.map(c => c.slice())
       : [[0, 0], [ed.src.width, 0], [ed.src.width, ed.src.height], [0, ed.src.height]];
+    ed.curve = p.curve || null;
 
     $("#edTitle").textContent = `${idx + 1}번 페이지`;
     showRot();
@@ -1883,6 +1993,7 @@ function startDrag(e, i) {
     const x = clamp((last.clientX - rect.left) / ed.scale, 0, ed.src.width);
     const y = clamp((last.clientY - rect.top) / ed.scale, 0, ed.src.height);
     ed.corners[i] = [x, y];
+    ed.curve = null;          // 손으로 맞춘 사각형은 곧은 것으로 본다
     drawCrop();
   };
   const move = ev => { last = ev; if (!raf) raf = requestAnimationFrame(draw); };
@@ -2286,12 +2397,13 @@ $("#camDone").onclick = () => { closeCam(); if (state.pages.length) toast("순�
 $("#edClose").onclick = closeEditor;
 $("#edFull").onclick = () => {
   ed.corners = [[0, 0], [ed.src.width, 0], [ed.src.width, ed.src.height], [0, ed.src.height]];
+  ed.curve = null;
   drawCrop();
 };
 $("#edAuto").onclick = () => {
   const c = detectCorners(ed.src);
   if (!c) { toast("종이를 찾지 못했어요. 직접 맞춰 주세요"); return; }
-  ed.corners = c; drawCrop();
+  ed.corners = c; ed.curve = detectCorners.curve; drawCrop();
 };
 $("#edRotate").onclick = () => { ed.rot = (ed.rot + 90) % 360; showRot(); };
 $$("#edFilter button").forEach(b => b.onclick = () => {
@@ -2306,6 +2418,7 @@ $("#edApply").onclick = async () => {
   const full = ed.corners.every((c, i) =>
     Math.abs(c[0] - box[i][0]) < 0.5 && Math.abs(c[1] - box[i][1]) < 0.5);
   p.corners = full ? null : ed.corners.map(c => c.slice());
+  p.curve = full ? null : (ed.curve || null);
   p.filter = ed.filter;
   p.rot = ed.rot;
   closeEditor();
@@ -2364,7 +2477,7 @@ window.addEventListener("beforeunload", e => {
     state.pages = rows.map(r => ({
       id: r.id, srcBlob: r.srcBlob, outBlob: r.outBlob,
       url: URL.createObjectURL(r.outBlob),
-      corners: r.corners, rot: r.rot || 0, filter: r.filter || "doc", busy: false
+      corners: r.corners, curve: r.curve || null, rot: r.rot || 0, filter: r.filter || "doc", busy: false
     }));
     toast(`이전 작업 ${state.pages.length}장을 불러왔어요`);
   }
