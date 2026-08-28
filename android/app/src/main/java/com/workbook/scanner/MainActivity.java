@@ -54,6 +54,7 @@ public class MainActivity extends Activity {
     private File curFile;
 
     @Override
+    @SuppressWarnings("deprecation")     // 구형 웹뷰용 setForceDark
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
 
@@ -74,8 +75,16 @@ public class MainActivity extends Activity {
         // 시스템이 어두운 모드일 때 웹뷰가 색을 임의로 뒤집지 않게 한다.
         // 이 페이지는 밝은 화면·어두운 화면을 스스로 다루므로(color-scheme 선언),
         // 웹뷰까지 손대면 스캔 결과나 버튼 색이 이상해진다.
+        //
+        // 이름이 두 개인 이유: 안드로이드 13(API 33)에서 ALGORITHMIC_DARKENING 으로
+        // 갈아엎기 전까지는 FORCE_DARK 가 그 일을 했다. 기기의 안드로이드 버전이
+        // 아니라 웹뷰(크롬) 버전이 기준이라, 업데이트를 오래 안 한 폰에서는
+        // 최신 이름이 없고 옛 이름만 있다. 그 폰에서 이걸 빼먹으면 스캔한
+        // 흰 종이가 통째로 검게 뒤집혀 보인다. 있는 쪽으로 끈다.
         if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
             WebSettingsCompat.setAlgorithmicDarkeningAllowed(s, false);
+        } else if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+            WebSettingsCompat.setForceDark(s, WebSettingsCompat.FORCE_DARK_OFF);
         }
 
         final WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
@@ -169,6 +178,7 @@ public class MainActivity extends Activity {
 
     /** 뒤로가기: 편집·촬영 화면이 열려 있으면 그것부터 닫고, 없으면 앱을 끝낸다 */
     private void handleBack() {
+        if (web == null) { finish(); return; }   // 이미 정리된 뒤에 눌린 경우
         web.evaluateJavascript(
                 "(window.__handleBack && window.__handleBack()) ? '1' : '0'",
                 value -> { if (value == null || !value.contains("1")) finish(); });
@@ -221,7 +231,15 @@ public class MainActivity extends Activity {
             try {
                 File dir = new File(getCacheDir(), "share");
                 if (!dir.exists() && !dir.mkdirs()) throw new Exception("폴더 생성 실패");
-                curFile = new File(dir, name.replaceAll("[/\\\\]", "_"));
+                // 이름은 웹 쪽이 지어 보내지만(설정에서 사용자가 바꿀 수 있다),
+                // 그대로 믿고 파일을 만들면 "../" 로 캐시 폴더 밖에 쓸 수 있다.
+                // 경로 구분자를 지우고, 만들어진 파일이 정말 이 폴더 안인지 확인한다.
+                String safe = name.replaceAll("[/\\\\]", "_").replace("..", "_");
+                if (safe.isEmpty()) safe = "scan.pdf";
+                File f = new File(dir, safe);
+                if (!f.getCanonicalPath().startsWith(dir.getCanonicalPath() + File.separator))
+                    throw new Exception("파일 이름이 올바르지 않습니다");
+                curFile = f;
                 curOut = new FileOutputStream(curFile);
             } catch (Exception e) {
                 curFile = null; curOut = null;

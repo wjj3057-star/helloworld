@@ -47,7 +47,17 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
+        // 소스에 한글이 들어 있다(토스트 문구, 공유 시트 제목, 주석).
+        // 자바 17 의 javac 는 -encoding 을 안 주면 그 컴퓨터의 기본 문자셋으로
+        // 읽는다. 리눅스 CI 는 UTF-8 이라 문제가 안 보이지만, 한국어 윈도우에서
+        // gradlew.bat 으로 빌드하면 MS949 로 읽어 "PDF 저장 실패" 같은 문구가
+        // 깨지거나 컴파일이 실패한다. 파일이 UTF-8 이라고 못을 박아 둔다.
+        encoding = 'UTF-8'
     }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
 }
 
 dependencies {
