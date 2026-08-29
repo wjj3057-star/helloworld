@@ -797,7 +797,7 @@ function usableQuad(q, w, h) {
 }
 
 /** 사각형 후보가 얼마나 그럴듯한지 점수화 */
-function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean) {
+function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean, paperCh) {
   const area = polyArea(quad);
   const frame = w * h;
   if (area < 0.045 * frame) return null;                    // 너무 작음
@@ -819,7 +819,7 @@ function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean) {
   }
 
   // 사각형 내부를 스캔라인으로 훑어 마스크와 얼마나 맞는지 + 안팎 밝기 차
-  let inside = 0, hit = 0;
+  let inside = 0, hit = 0, pSum = 0, gSum = 0;
   const ys = quad.map(p => p[1]);
   const y0 = Math.max(0, Math.floor(Math.min(...ys))), y1 = Math.min(h - 1, Math.ceil(Math.max(...ys)));
   for (let y = y0; y <= y1; y++) {
@@ -838,11 +838,15 @@ function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean) {
       const i = y * w + x;
       inside++;
       if (mask[i]) hit++;
+      if (paperCh) { pSum += paperCh[i]; gSum += gray[i]; }
     }
   }
   if (!inside) return null;
   const fill = hit / inside;                    // 사각형 안이 종이로 차 있는가
   const cover = blobSize ? hit / blobSize : 0;  // 종이를 빠짐없이 담았는가
+  // 안이 "종이색"(밝고 색기 없음)인 정도. 흰 종이는 종이다움≈밝기라 1.0 근처,
+  // 나무는 색이 있어 뚝 떨어진다(진한 나무 0.59 / 밝은 나무 0.79 / 미색 종이 0.92).
+  const paperish = paperCh && gSum > 0 ? pSum / gSum : 1;
 
   // 변을 사이에 둔 안쪽/바깥쪽 밝기 단차.
   // 전체 평균으로 비교하면 글씨가 많은 페이지에서 오히려 안쪽이 어두워지므로,
@@ -850,7 +854,8 @@ function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean) {
   const cx = (quad[0][0]+quad[1][0]+quad[2][0]+quad[3][0]) / 4;
   const cy = (quad[0][1]+quad[1][1]+quad[2][1]+quad[3][1]) / 4;
   const off = Math.max(3, Math.round(Math.min(w, h) * 0.02));
-  let stepSum = 0, stepN = 0;
+  const off2 = Math.round(off * 2.5);            // "선 하나 너머"까지 나간 바깥
+  let stepSum = 0, stepN = 0, farSum = 0, farN = 0;
   for (let i = 0; i < 4; i++) {
     const a = quad[i], b = quad[(i + 1) % 4];
     const steps = Math.max(6, Math.round(dist(a, b) / 6));
@@ -864,26 +869,72 @@ function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean) {
       if (ix < 0 || iy < 0 || ix >= w || iy >= h) continue;
       if (ox < 0 || oy < 0 || ox >= w || oy >= h) continue;
       stepSum += gray[iy * w + ix] - gray[oy * w + ox]; stepN++;
+      const fx = Math.round(px - nx * off2), fy = Math.round(py - ny * off2);
+      if (fx < 0 || fy < 0 || fx >= w || fy >= h) continue;
+      farSum += gray[iy * w + ix] - gray[fy * w + fx]; farN++;
     }
   }
   const contrast = stepN ? stepSum / stepN : 0;
+  const far = farN ? farSum / farN : contrast;
 
   // 변을 따라 실제 경계(밝기 변화)가 있는가 — 가짜 사각형을 걸러내는 핵심
   let gs = 0, gn = 0;
+  const edgeStr = [];                           // 변마다 따로도 남긴다(아래 연장선 검사용)
   for (let i = 0; i < 4; i++) {
     const a = quad[i], b = quad[(i + 1) % 4];
     const steps = Math.max(8, Math.round(dist(a, b) / 2));
+    let s1 = 0, n1 = 0;
     for (let k = 0; k <= steps; k++) {
       const t = k / steps;
       const x = Math.round(a[0] + t * (b[0]-a[0])), y = Math.round(a[1] + t * (b[1]-a[1]));
-      if (x < 1 || y < 1 || x >= w - 1 || y >= h - 1) { gn++; continue; }
+      if (x < 1 || y < 1 || x >= w - 1 || y >= h - 1) { n1++; continue; }
       let m = 0;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++)
         m = Math.max(m, grad[(y+dy) * w + x+dx]);
-      gs += m; gn++;
+      s1 += m; n1++;
     }
+    edgeStr.push(s1 / Math.max(1, n1));
+    gs += s1; gn += n1;
   }
-  const edge = clamp((gs / Math.max(1, gn)) / Math.max(6, gradMean * 3.2), 0, 1);
+  const norm = Math.max(6, gradMean * 3.2);
+  const edge = clamp((gs / Math.max(1, gn)) / norm, 0, 1);
+
+  // 변이 사각형 밖으로 "이어지는가" — 나무 널바닥에서 결정적인 검사.
+  //
+  // 널판 사이 홈은 진하고 곧아서, 홈 두 줄 사이의 띠가 채움 1.00 · 포함 1.00 ·
+  // edge 1.0 을 받아 진짜 종이(3.5점)와 0.05점 차이까지 붙는다(실측 3.43~3.45).
+  // 그 정도 차이는 조명 하나로 뒤집힌다 — 실사용에서 바닥을 잡는 원인.
+  //
+  // 종이 모서리는 꼭짓점에서 끝나지만 바닥 무늬 선은 화면을 가로질러 이어진다.
+  // 진한 변마다 두 가지를 본다.
+  //  · 연장선이 화면 안에 있으면: 그 위의 경계 강도가 변 위의 70% 를 넘는가
+  //  · 연장선이 화면 밖이면: 변이 화면 끝에서 끝까지 가로지른다는 뜻이다.
+  //    널판 홈이 정확히 이 모양이라, 이것도 "이어짐"으로 센다. 한쪽만 잘린
+  //    종이는 이런 변이 하나뿐이므로 두 개부터 무늬로 판정해도 다치지 않는다.
+  // 흐린 변(정규화 0.5 미만)은 아예 판단하지 않는다(흰-흰 종이 보호).
+  let through = 0;
+  for (let i = 0; i < 4; i++) {
+    if (edgeStr[i] / norm < 0.5) continue;
+    const a = quad[i], b = quad[(i + 1) % 4];
+    const len = dist(a, b) || 1;
+    const dx = (b[0]-a[0]) / len, dy = (b[1]-a[1]) / len;
+    const step = Math.max(3, len * 0.045);
+    let es = 0, en = 0;
+    for (let k = 1; k <= 6; k++) {
+      const cand = [[a[0] - dx * step * k, a[1] - dy * step * k],
+                    [b[0] + dx * step * k, b[1] + dy * step * k]];
+      for (const [px, py] of cand) {
+        const x = Math.round(px), y = Math.round(py);
+        if (x < 1 || y < 1 || x >= w - 1 || y >= h - 1) continue;
+        let m = 0;
+        for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++)
+          m = Math.max(m, grad[(y+oy) * w + x+ox]);
+        es += m; en++;
+      }
+    }
+    if (en < 5) through++;                            // 화면을 통째로 가로지르는 진한 변
+    else if (es / en >= 0.7 * edgeStr[i]) through++;  // 연장선에도 같은 경계가 있다
+  }
 
   if (fill < 0.72 || cover < 0.55) return null;
 
@@ -906,7 +957,8 @@ function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean) {
   const ink = clamp((-contrast - 5) / 25, 0, 1);
   const score = 1.35 * fill + 1.15 * cover + 0.75 * edge
               + 0.55 * Math.min(area / frame, 0.95) - 1.60 * ink;
-  return { score, fill, cover, edge, contrast, areaPct: area / frame };
+  return { score, fill, cover, edge, contrast, far, areaPct: area / frame, through, paperish,
+           eStr: [0, 1, 2, 3].map(i => +(edgeStr[i] / norm).toFixed(2)) };   // 변별 강도(측정용)
 }
 
 /** 3x3 상자 흐리기를 times 번 겹쳐 건다(분리형이라 반지름과 무관하게 싸다) */
@@ -1255,7 +1307,7 @@ function detectCorners(canvas, srcData, fast) {
     if (!quad) return;
     quad = orderCorners(refineQuad(orderCorners(quad), pts));
 
-    const sc = scoreQuad(quad, mask, grad, gray, w, h, bestSize, gradMean);
+    const sc = scoreQuad(quad, mask, grad, gray, w, h, bestSize, gradMean, paper);
     if (!sc) return;
     // 경계 기반 경로 전용: 변이 진한 경계 위에 놓인 후보는 여기 것이 아니다.
     // 이 경로는 "밝기로는 안 보이는 흐린 종이 테두리"를 찾으려고 있다. 진한
@@ -1273,6 +1325,18 @@ function detectCorners(canvas, srcData, fast) {
     // 선을 그은 것이다. 종이 가장자리는 안쪽이 여백(밝음)이라 이렇게 될 수 없다.
     // (실측: 진짜 종이 -4~+203 / 글씨 한가운데를 두른 사각형 -110)
     if (sc.contrast < -40) return;
+    // 진한 변이 두 개 이상 사각형 밖으로 이어지면 종이가 아니라 바닥 무늬다.
+    // 종이 모서리는 꼭짓점에서 끝난다. 한 변쯤은 우연히 무늬 위에 얹힐 수
+    // 있으니 두 변부터 버린다. (실측: 널바닥 띠 through 2 / 진짜 종이 0)
+    if (sc.through >= 2) return;
+    // 이어지는 변이 하나뿐이면 "한쪽이 잘린 종이"와 모양이 같아 이것만으로는
+    // 못 버린다. 내용물로 가른다.
+    //  · far — 종이는 먼 바깥(옆 널판 너머)보다도 밝지만, 널바닥 띠는 홈 선
+    //    하나만 지나면 도로 같은 바닥이라 먼 단차가 없다
+    //  · paperish — 안이 종이색(밝고 색기 없음)인가. 널판끼리 색이 달라 far
+    //    단차가 진짜로 생기는 바닥(실측 26~53)은 이것으로만 걸린다
+    // 흔한 촬영(네 변이 다 보이는 종이)은 through 0 이라 여기 안 온다.
+    if (sc.through >= 1 && (sc.far < 18 || sc.paperish < 0.87)) return;
     if (detectCorners.debug) detectCorners.all.push({ ...sc, quad: quad.map(p => [p[0] / s, p[1] / s]) });
     if (sc.score > bestScore) {
       bestScore = sc.score; best = quad; bestInfo = sc;
