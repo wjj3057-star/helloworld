@@ -855,7 +855,7 @@ function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean, paperCh) {
   const cy = (quad[0][1]+quad[1][1]+quad[2][1]+quad[3][1]) / 4;
   const off = Math.max(3, Math.round(Math.min(w, h) * 0.02));
   const off2 = Math.round(off * 2.5);            // "선 하나 너머"까지 나간 바깥
-  let stepSum = 0, stepN = 0, farSum = 0, farN = 0;
+  let stepSum = 0, stepAbs = 0, stepN = 0, farSum = 0, farN = 0;
   for (let i = 0; i < 4; i++) {
     const a = quad[i], b = quad[(i + 1) % 4];
     const steps = Math.max(6, Math.round(dist(a, b) / 6));
@@ -868,7 +868,8 @@ function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean, paperCh) {
       const ox = Math.round(px - nx * off), oy = Math.round(py - ny * off);
       if (ix < 0 || iy < 0 || ix >= w || iy >= h) continue;
       if (ox < 0 || oy < 0 || ox >= w || oy >= h) continue;
-      stepSum += gray[iy * w + ix] - gray[oy * w + ox]; stepN++;
+      const st = gray[iy * w + ix] - gray[oy * w + ox];
+      stepSum += st; stepAbs += st < 0 ? -st : st; stepN++;
       const fx = Math.round(px - nx * off2), fy = Math.round(py - ny * off2);
       if (fx < 0 || fy < 0 || fx >= w || fy >= h) continue;
       farSum += gray[iy * w + ix] - gray[fy * w + fx]; farN++;
@@ -876,28 +877,71 @@ function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean, paperCh) {
   }
   const contrast = stepN ? stepSum / stepN : 0;
   const far = farN ? farSum / farN : contrast;
+  // 단차의 "일관성" — 테두리를 한 바퀴 도는 동안 안팎 밝기차의 방향이 한결같은가.
+  // 진짜 종이는 어느 변에서나 안쪽이 더 밝거나(어둡거나) 하므로 1에 가깝고,
+  // 조명 경사를 임계값으로 자른 자리는 변마다 부호가 엇갈려 0에 가깝다.
+  const agree = stepAbs > 0 ? Math.abs(stepSum) / stepAbs : 0;
 
-  // 변을 따라 실제 경계(밝기 변화)가 있는가 — 가짜 사각형을 걸러내는 핵심
+  /* 변을 따라 실제 경계(밝기 변화)가 있는가 — 가짜 사각형을 걸러내는 핵심.
+   *
+   * 변 위를 그대로 찍으면 안 된다. 여기 들어오는 사각형은 420px 로 줄인 그림에서
+   * 대충 잡은 것이라 진짜 테두리에서 서너 픽셀 비켜나 있다(원본 해상도 재정렬은
+   * 이 다음 단계다). 그런데 어두운 책상 위 흰 종이의 경계는 폭이 3~4px 인 좁은
+   * 봉우리라, 그 정도만 어긋나도 봉우리를 통째로 놓친다.
+   *
+   * 실측한 단면이다 — 변은 y=37 에 있는데 진짜 경계는 y=41 이었다.
+   *   밝기   52  52  52  52  52 255 255      (y = 36…42)
+   *   기울기  0   0   0  67 135 136  68
+   * 그래서 완벽하게 찾아낸 흰 종이가 경계 강도 0 을 받고 있었다. 지표가 죽어
+   * 있었던 것이라, 이걸 문턱으로 쓰면 멀쩡한 사진이 통째로 버려진다.
+   *
+   * 변의 법선 방향으로 ±R 만큼 훑어 가장 센 곳을 쓴다. "이 선 근처에 경계가
+   * 있는가"를 묻는 것이 원래 의도이기도 하다. 값 개수는 예전 3x3(9번)과
+   * 같아 비용도 그대로다.
+   */
+  const R = Math.max(3, Math.round(Math.min(w, h) / 110) + 2);
   let gs = 0, gn = 0;
-  const edgeStr = [];                           // 변마다 따로도 남긴다(아래 연장선 검사용)
+  const edgeStr = [];                           // 변마다 따로도 남긴다(아래 검사들이 쓴다)
+  const edgeSeen = [];                          // 그 변에서 실제로 재어진 표본 비율
   for (let i = 0; i < 4; i++) {
     const a = quad[i], b = quad[(i + 1) % 4];
-    const steps = Math.max(8, Math.round(dist(a, b) / 2));
-    let s1 = 0, n1 = 0;
+    const len = dist(a, b) || 1;
+    const enx = -(b[1] - a[1]) / len, eny = (b[0] - a[0]) / len;   // 변의 법선
+    const steps = Math.max(8, Math.round(len / 2));
+    let s1 = 0, n1 = 0, seen = 0;
     for (let k = 0; k <= steps; k++) {
       const t = k / steps;
-      const x = Math.round(a[0] + t * (b[0]-a[0])), y = Math.round(a[1] + t * (b[1]-a[1]));
-      if (x < 1 || y < 1 || x >= w - 1 || y >= h - 1) { n1++; continue; }
-      let m = 0;
-      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++)
-        m = Math.max(m, grad[(y+dy) * w + x+dx]);
-      s1 += m; n1++;
+      const px = a[0] + t * (b[0]-a[0]), py = a[1] + t * (b[1]-a[1]);
+      let m = -1;
+      for (let d = -R; d <= R; d++) {
+        const x = Math.round(px + enx * d), y = Math.round(py + eny * d);
+        if (x < 1 || y < 1 || x >= w - 1 || y >= h - 1) continue;
+        const v = grad[y * w + x];
+        if (v > m) m = v;
+      }
+      if (m < 0) { n1++; continue; }             // 이 표본은 화면 밖이라 못 쟀다
+      s1 += m; n1++; seen++;
     }
     edgeStr.push(s1 / Math.max(1, n1));
+    edgeSeen.push(seen / Math.max(1, steps + 1));
     gs += s1; gn += n1;
   }
   const norm = Math.max(6, gradMean * 3.2);
   const edge = clamp((gs / Math.max(1, gn)) / norm, 0, 1);
+  // 네 변 중 가장 약한 변. 평균(edge)만 보면 변 하나가 글씨 줄을 가로질러
+  // 얻은 큰 값이 나머지 빈 변들을 가려 버린다. 진짜 종이는 네 변이 모두
+  // 자기 테두리 위에 있으므로 가장 약한 변도 0 이 아니다.
+  //
+  // 표본을 아예 못 잡은 변(화면 밖)은 판단에서 뺀다.
+  //
+  // 화면 테두리 "바로 안쪽"에 놓인 변까지 빼 볼까 했는데, 그러면 창문 옆에서
+  // 찍은 밝기 경사 사진의 쓰레기 후보(화면 53%)가 같이 살아나 603px 를 잡는다.
+  // 종이가 화면을 넘친 사진은 자르지 않고 원본을 그대로 쓰게 두는 편이,
+  // 멀쩡한 사진에서 엉뚱한 데를 자르는 것보다 낫다.
+  const measurable = [0, 1, 2, 3].filter(i => edgeSeen[i] >= 0.5);
+  const edgeMin = measurable.length
+    ? clamp(Math.min(...measurable.map(i => edgeStr[i])) / norm, 0, 1)
+    : 0;
 
   // 변이 사각형 밖으로 "이어지는가" — 나무 널바닥에서 결정적인 검사.
   //
@@ -932,11 +976,24 @@ function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean, paperCh) {
         es += m; en++;
       }
     }
-    if (en < 5) through++;                            // 화면을 통째로 가로지르는 진한 변
+    // 연장선을 거의 못 재는 경우(표본이 화면 밖) — 두 갈래다.
+    //  · 변의 양 끝이 화면 테두리에 닿아 있으면 진짜로 화면을 가로지르는 선이다
+    //    (널판 홈이 이렇다) → 무늬로 센다
+    //  · 그냥 종이가 커서 연장선이 곧 화면을 벗어나는 것뿐이면 아무 뜻도 없다
+    //    → 세지 않는다. 예전엔 이걸 구분하지 않아, 화면을 크게 채운 종이가
+    //    통째로 버려졌다(어두운 책상 위 흰 A4 가 아예 검출되지 않았다).
+    const brd = Math.max(2, Math.min(w, h) * 0.012);
+    const atBorder = p => p[0] <= brd || p[1] <= brd || p[0] >= w - 1 - brd || p[1] >= h - 1 - brd;
+    if (en < 5) { if (atBorder(a) && atBorder(b)) through++; }
     else if (es / en >= 0.7 * edgeStr[i]) through++;  // 연장선에도 같은 경계가 있다
   }
 
-  if (fill < 0.72 || cover < 0.55) return null;
+  // 채움 0.84 는 실측으로 잡았다. 다섯 벤치 38장면의 후보를 전부 모아 보니
+  // 진짜 종이 후보 167개의 채움 최저값이 0.897(비뚤게 찍은 저대비 A4)이고,
+  // 크게 빗나간 후보 31개 중 12개가 그 아래에 있었다. 0.72 는 너무 헐거워서,
+  // 형광등 아래 흰 라미네이트 책상(책상이 종이보다 밝은 경우)에서 채움 0.80
+  // 짜리 쓰레기가 진짜 종이를 이기고 있었다.
+  if (fill < 0.84 || cover < 0.55) return null;
 
   // 경계 강도(edge)에 크게 기대면 안 된다. 흰 종이를 흰 책상에 놓으면 종이
   // 가장자리는 흐린데 종이 안의 글씨 가장자리는 진해서, 글씨 덩어리가 종이를
@@ -957,7 +1014,7 @@ function scoreQuad(quad, mask, grad, gray, w, h, blobSize, gradMean, paperCh) {
   const ink = clamp((-contrast - 5) / 25, 0, 1);
   const score = 1.35 * fill + 1.15 * cover + 0.75 * edge
               + 0.55 * Math.min(area / frame, 0.95) - 1.60 * ink;
-  return { score, fill, cover, edge, contrast, far, areaPct: area / frame, through, paperish,
+  return { score, fill, cover, edge, edgeMin, contrast, far, agree, areaPct: area / frame, through, paperish,
            eStr: [0, 1, 2, 3].map(i => +(edgeStr[i] / norm).toFixed(2)) };   // 변별 강도(측정용)
 }
 
@@ -1321,6 +1378,22 @@ function detectCorners(canvas, srcData, fast) {
     // (실측: 화면 99%를 덮는 쓰레기 후보가 3.0점을 받아 2·3차를 막고 있었다)
     if (sc.areaPct > 0.93) return;                          // 화면을 거의 다 덮음
     if (sc.edge < 0.10 && Math.abs(sc.contrast) < 3) return; // 경계도 단차도 없음
+    // 변 위에 밝기 변화가 사실상 하나도 없으면 종이 테두리일 수 없다.
+    // 천장등·창문이 만드는 완만한 밝기 경사를 임계값으로 자르면 이런 후보가
+    // 나온다 — 경계랄 게 없는데도 채움·포함이 만점이라 점수는 높다.
+    // (실측: 진짜 종이 최저 0.112 / 경사를 자른 화면 82% 짜리 후보 0.02)
+    if (sc.edge < 0.05) return;
+    // 네 변이 "모두" 자기 테두리 위에 있어야 한다.
+    //
+    // 평균만 보면 속는다. 형광등 아래 흰 라미네이트 책상(책상이 종이보다 밝은
+    // 경우)에서 화면 49% 짜리 쓰레기 후보가 평균 0.59 로 진짜 종이(0.19)를
+    // 크게 앞섰는데, 뜯어보니 변 하나가 인쇄된 글씨 줄을 길게 가로질러 얻은
+    // 점수였고 나머지 변은 맨 책상 위라 사실상 0 이었다.
+    //
+    // 문턱 0.04 는 실측으로 잡았다. 37장면의 정답 후보 중 가장 약한 변이
+    // 0.070(흰 책상·거의 같은 밝기)이고, 0.03~0.07 어디에 두어도 37/37 이
+    // 나온다. 정답을 놓치는 쪽이 더 나쁘므로 아래쪽으로 여유를 두었다.
+    if (sc.edgeMin < 0.04) return;
     // 변 안쪽이 바깥쪽보다 한참 어두우면, 종이 테두리가 아니라 잉크 한가운데에
     // 선을 그은 것이다. 종이 가장자리는 안쪽이 여백(밝음)이라 이렇게 될 수 없다.
     // (실측: 진짜 종이 -4~+203 / 글씨 한가운데를 두른 사각형 -110)
