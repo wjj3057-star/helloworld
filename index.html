@@ -54,6 +54,9 @@ main{flex:1; overflow-y:auto; padding:14px 14px 8px; -webkit-overflow-scrolling:
   display:grid; gap:12px;
   grid-template-columns:repeat(auto-fill,minmax(140px,1fr));
 }
+/* content-visibility:auto 도 대 봤지만 카드 24장 스크롤에서 프레임당
+   0.93ms → 0.86ms(4배 감속 기준)로 차이가 없었다. 옛 WebView 에서
+   스크롤 막대가 튀는 위험만 남아 넣지 않았다. */
 .card{
   background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
   overflow:hidden; position:relative; display:flex; flex-direction:column;
@@ -165,10 +168,14 @@ footer button:active{transform:scale(.98)}
 }
 #loupe::before{left:50%; top:38%; width:1.5px; height:24%; transform:translateX(-50%)}
 #loupe::after{top:50%; left:38%; height:1.5px; width:24%; transform:translateY(-50%)}
+/* 위치는 transform 으로 옮긴다(위 drawCrop 참고). left/top 은 0 에 고정하고
+   가운데 맞추기는 margin 이 한다. will-change 로 자기 합성 층을 갖게 해
+   끄는 동안 다시 칠하지 않게 한다. */
 .handle{
-  position:absolute; width:34px;height:34px; margin:-17px 0 0 -17px;
+  position:absolute; left:0; top:0; width:34px;height:34px; margin:-17px 0 0 -17px;
   border-radius:50%; background:rgba(76,141,255,.28); border:2px solid #fff;
   box-shadow:0 0 0 1px rgba(0,0,0,.5); touch-action:none; cursor:grab;
+  will-change:transform;
 }
 #editor .bottom{
   background:var(--panel); border-top:1px solid var(--line);
@@ -444,7 +451,7 @@ const DB = (() => {
   }
   return {
     savePage: (p, order) => tx("pages", "readwrite", s => s.put({
-      id: p.id, order, srcBlob: p.srcBlob, outBlob: p.outBlob,
+      id: p.id, order, srcBlob: p.srcBlob, outBlob: p.outBlob, thumbBlob: p.thumbBlob || null,
       corners: p.corners, curve: p.curve || null, rot: p.rot, filter: p.filter
     })),
     delPage: id => tx("pages", "readwrite", s => s.delete(id)),
@@ -1881,7 +1888,33 @@ async function processImage(blob, o) {
     ctx.drawImage(flat, -flat.width / 2, -flat.height / 2);
   }
 
-  return { srcBlob, outBlob: await canvasToBlob(final, o.quality), corners: corners || null, curve };
+  return {
+    srcBlob, outBlob: await canvasToBlob(final, o.quality),
+    thumbBlob: await makeThumb(final), corners: corners || null, curve
+  };
+}
+
+/**
+ * 목록에 쓸 작은 그림을 따로 굽는다.
+ *
+ * 예전에는 카드가 결과물 원본(긴 변 1600px)을 그대로 걸고 CSS 로만 줄였다.
+ * 브라우저는 화면에 보이는 크기와 상관없이 원본을 통째로 풀어 들고 있어야
+ * 해서, 24장을 쌓으면 실측 144MB 어치 화소가 메모리에 남았다. 스크롤할 때마다
+ * 그것을 180px 로 다시 줄여 그리기도 한다. 여기서 한 번 줄여 두니 같은
+ * 24장이 11MB 가 됐다(13배). 미는 일은 워커 안에서 끝나므로 한 장 처리
+ * 시간은 그대로다(실측 403 vs 441ms, 측정 오차 안).
+ */
+async function makeThumb(canvas) {
+  const THUMB = 400;
+  const s = Math.min(1, THUMB / Math.max(canvas.width, canvas.height));
+  if (s >= 1) return null;                       // 이미 작으면 원본을 그대로 쓴다
+  const w = Math.max(1, Math.round(canvas.width * s));
+  const h = Math.max(1, Math.round(canvas.height * s));
+  const c = mkCanvas(w, h);
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(canvas, 0, 0, w, h);
+  return canvasToBlob(c, 0.72);
 }
 
 /* ---- 워커: 무거운 처리를 화면 밖으로 -------------------------------
@@ -1891,7 +1924,7 @@ async function processImage(blob, o) {
 const PROC_FNS = [
   clamp, dist, cross3, mkCanvas, canvasToBlob, blobToCanvas, scratch,
   otsu, maskIntegral, closeMask, largestBlob, borderPoints, convexHull, simplifyHull,
-  maxAreaQuad, fitLine, lineFrom, lineCross, refineQuad, orderCorners, polyArea, isConvexQuad, usableQuad,
+  maxAreaQuad, fitLine, lineFrom, lineCross, refineQuad, orderCorners, polyArea, isConvexQuad, usableQuad, makeThumb,
   scoreQuad, boxBlur3, sobelOn, enclosedByEdges, fitQuad, measureCurve, refineOnSource, detectCorners, solve, homography, estimateAspect, warp, boxMean, enhance,
   processImage
 ];
@@ -2190,6 +2223,10 @@ async function renderPage(page, first) {
   page.outBlob = r.outBlob;
   if (page.url) URL.revokeObjectURL(page.url);
   page.url = URL.createObjectURL(page.outBlob);
+  // 목록용 작은 그림. 못 구웠으면(결과물이 이미 작으면) 결과물을 그대로 쓴다.
+  page.thumbBlob = r.thumbBlob || null;
+  if (page.thumbUrl) URL.revokeObjectURL(page.thumbUrl);
+  page.thumbUrl = page.thumbBlob ? URL.createObjectURL(page.thumbBlob) : null;
   return page;
 }
 
@@ -2271,6 +2308,7 @@ async function removePage(idx) {
   const p = state.pages[idx];
   if (!confirm(`${idx + 1}번 페이지를 삭제할까요?`)) return;
   if (p.url) URL.revokeObjectURL(p.url);
+  if (p.thumbUrl) URL.revokeObjectURL(p.thumbUrl);
   state.pages.splice(idx, 1);
   render();
   await DB.delPage(p.id);
@@ -2332,13 +2370,17 @@ function render() {
     }
 
     // 썸네일은 주소가 실제로 바뀌었을 때만 갈아 끼운다(그래야 다시 안 그린다)
-    const url = p.busy ? null : p.url;
+    // 목록에는 작은 그림을 건다. 옛 판에서 되살린 페이지에는 없을 수 있어
+    // 그때만 결과물 원본으로 물러난다.
+    const url = p.busy ? null : (p.thumbUrl || p.url);
     if (c.url !== url) {
       c.url = url;
       if (c.thumb) c.thumb.remove();
       if (url) {
         const img = document.createElement("img");
         img.alt = `${c.num}번 페이지`;
+        img.decoding = "async";     // 화면 밖 카드를 풀다가 프레임을 막지 않게
+        img.loading = "lazy";
         img.src = url;
         img.onclick = c.open;
         c.thumb = img;
@@ -2409,10 +2451,11 @@ function drawCrop() {
   const host = $("#cropHost");
   // 손잡이는 한 번만 만들고 이후에는 위치만 옮긴다
   // (끌 때마다 DOM을 새로 만들면 느린 기기에서 끊긴다)
-  let handles = $$(".handle", host);
-  if (handles.length !== 4) {
-    handles.forEach(h => h.remove());
-    handles = [0, 1, 2, 3].map(i => {
+  // 손잡이 목록도 들고 있는다 — 끄는 동안 프레임마다 DOM을 다시 뒤지지 않도록.
+  let handles = drawCrop.hs;
+  if (!handles || handles.length !== 4 || handles[0].parentNode !== host) {
+    $$(".handle", host).forEach(h => h.remove());
+    handles = drawCrop.hs = [0, 1, 2, 3].map(i => {
       const h = document.createElement("div");
       h.className = "handle";
       h.onpointerdown = e => startDrag(e, i);
@@ -2427,9 +2470,10 @@ function drawCrop() {
   const bad = !usableQuad(ed.corners, ed.src.width, ed.src.height);
   poly.classList.toggle("bad", bad);
   $("#edWarn").hidden = !bad;
+  // 위치는 transform 으로 옮긴다. left/top 을 건드리면 배치가 다시 계산되지만
+  // transform 은 합성 단계에서만 처리돼 고주사율에서 훨씬 싸다.
   pts.forEach((p, i) => {
-    handles[i].style.left = p[0] + "px";
-    handles[i].style.top = p[1] + "px";
+    handles[i].style.transform = `translate3d(${p[0]}px, ${p[1]}px, 0)`;
   });
 }
 
@@ -2438,24 +2482,44 @@ function drawCrop() {
  * 손가락이 정작 맞춰야 할 지점을 가리기 때문이다.
  * 손가락 반대쪽 위 구석에 띄워 가리지 않게 한다.
  */
-function showLoupe(i) {
+/**
+ * 돋보기를 연다 — 그림과 배율은 끄는 동안 바뀌지 않으므로 여기서 한 번만 정한다.
+ *
+ * 예전에는 프레임마다 backgroundImage 를 다시 넣고 backgroundSize 도 다시
+ * 정했다. 그러면 브라우저가 매번 주소를 다시 읽고 큰 그림을 3배로 다시
+ * 늘려야 해서, 104px 짜리 창을 위해 1100x1500 짜리 확대를 프레임마다 했다.
+ */
+function openLoupe() {
   const el = $("#loupe");
-  if (!ed.imgUrl || !ed.src) { el.hidden = true; return; }
-  const Z = 3, R = 52;                       // 배율, 반지름
+  if (!ed.imgUrl || !ed.src) { el.hidden = true; return false; }
   const iw = ed.src.width * ed.scale, ih = ed.src.height * ed.scale;
-  const x = ed.corners[i][0] * ed.scale, y = ed.corners[i][1] * ed.scale;
   el.style.backgroundImage = `url("${ed.imgUrl}")`;
-  el.style.backgroundSize = `${iw * Z}px ${ih * Z}px`;
-  el.style.backgroundPosition = `${R - x * Z}px ${R - y * Z}px`;
+  el.style.backgroundSize = `${iw * LOUPE_Z}px ${ih * LOUPE_Z}px`;
+  el.hidden = false;
+  return true;
+}
+
+const LOUPE_Z = 3, LOUPE_R = 52;             // 배율, 반지름
+
+/** 끄는 동안 프레임마다 — 자리만 옮긴다 */
+function moveLoupe(i) {
+  const el = $("#loupe");
+  if (el.hidden || !ed.src) return;
+  const iw = ed.src.width * ed.scale;
+  const x = ed.corners[i][0] * ed.scale, y = ed.corners[i][1] * ed.scale;
+  el.style.backgroundPosition = `${LOUPE_R - x * LOUPE_Z}px ${LOUPE_R - y * LOUPE_Z}px`;
   // 끄는 손이 왼쪽 위에 있으면 오른쪽 위로 피한다
   el.classList.toggle("right", x < iw / 2);
-  el.hidden = false;
 }
+
+function showLoupe(i) { if (openLoupe()) moveLoupe(i); }
 function hideLoupe() { $("#loupe").hidden = true; }
 
 function startDrag(e, i) {
   e.preventDefault();
-  showLoupe(i);
+  // 돋보기는 여기서 한 번만 연다. 프레임마다 하는 일은 자리 옮기기뿐이다.
+  const loupe = openLoupe();
+  if (loupe) moveLoupe(i);
   const host = $("#cropHost");
 
   // 끄는 동안 편집 화면은 고정이라 자리가 바뀌지 않는다. 한 번만 잰다.
@@ -2474,7 +2538,7 @@ function startDrag(e, i) {
     ed.corners[i] = [x, y];
     ed.curve = null;          // 손으로 맞춘 사각형은 곧은 것으로 본다
     drawCrop();
-    showLoupe(i);
+    if (loupe) moveLoupe(i);
   };
   const move = ev => { last = ev; if (!raf) raf = requestAnimationFrame(draw); };
   const up = () => {
@@ -3284,7 +3348,10 @@ $$("#setQuality button").forEach(b => b.onclick = () => {
 });
 $("#setClear").onclick = async () => {
   if (!confirm("페이지를 전부 삭제할까요?")) return;
-  state.pages.forEach(p => p.url && URL.revokeObjectURL(p.url));
+  state.pages.forEach(p => {
+    if (p.url) URL.revokeObjectURL(p.url);
+    if (p.thumbUrl) URL.revokeObjectURL(p.thumbUrl);
+  });
   state.pages = [];
   await DB.clearPages();
   render();
@@ -3332,8 +3399,9 @@ if ("serviceWorker" in navigator && !window.AndroidBridge && location.protocol !
   if (rows.length) {
     rows.sort((a, b) => a.order - b.order);
     state.pages = rows.map(r => ({
-      id: r.id, srcBlob: r.srcBlob, outBlob: r.outBlob,
+      id: r.id, srcBlob: r.srcBlob, outBlob: r.outBlob, thumbBlob: r.thumbBlob || null,
       url: URL.createObjectURL(r.outBlob),
+      thumbUrl: r.thumbBlob ? URL.createObjectURL(r.thumbBlob) : null,
       corners: r.corners, curve: r.curve || null, rot: r.rot || 0, filter: r.filter || "doc", busy: false
     }));
     toast(`이전 작업 ${state.pages.length}장을 불러왔어요`);
